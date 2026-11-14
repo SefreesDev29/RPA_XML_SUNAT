@@ -1,0 +1,29 @@
+[project]
+name = "robot-xml-sunat"
+version = "0.1.0"
+description = "Descarga Automatizada de XMLs del Portal de la SUNAT."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "keyring>=25.7.0",
+    "loguru>=0.7.3",
+    "msal>=1.39.0",
+    "openpyxl>=3.1.5",
+    "pandas>=3.1.0",
+    "playwright>=1.64.1",
+    "pydantic-settings>=2.16.1",
+    "requests>=2.34.2",
+    "rich>=15.0.0",
+    "xlsxwriter>=3.3.0",
+]
+
+[tool.uv]
+allow-insecure-host = [
+  "pypi.org",
+  "files.pythonhosted.org",
+  "pypi.python.org"
+]
+
+[tool.ruff]
+lint.ignore = ["E401", "I001", "TRY002", "BLE001"]
+line-length = 120

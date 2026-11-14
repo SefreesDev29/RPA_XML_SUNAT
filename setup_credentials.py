@@ -1,0 +1,79 @@
+# import getpass getpass.getpass("Ingrese el Usuario SOL LPG: ")
+import os
+import sys
+import keyring
+import msvcrt
+import time
+from rich.console import Console
+from rich.panel import Panel
+
+console = Console()
+
+AMBIENTE = os.getenv("APP_ENV", "DEV").upper()
+SERVICIO = f"RPA_SUNAT_{AMBIENTE}"
+
+def masked_input(prompt: str) -> str:
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    chars = []
+    while True:
+        key = msvcrt.getwch()
+        if key in ("\r", "\n"):
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            break
+        elif key == "\x03":
+            raise KeyboardInterrupt
+        elif key == "\x08":
+            if chars:
+                chars.pop()
+                sys.stdout.write("\b \b")
+                sys.stdout.flush()
+        elif key in ("\x00", "\xe0"):
+            msvcrt.getwch()
+        else:
+            chars.append(key)
+            sys.stdout.write("*")
+            sys.stdout.flush()
+
+    return "".join(chars)
+
+console.print(
+    Panel.fit(
+        f"[bold white]APROVISIONAMIENTO DE CREDENCIALES[/bold white]\n"
+        f"Entorno destino: [bold cyan]{SERVICIO}[/bold cyan]\nLas credenciales se cifrarán localmente.",
+        border_style="cyan",
+    )
+)
+
+try:
+    usuario_lpg = masked_input("Ingrese el Usuario SOL LPG: ").strip()
+    password_lpg = masked_input("Ingrese la Clave SOL LPG: ").strip()
+
+    usuario_lpe = masked_input("Ingrese el Usuario SOL LPE: ").strip()
+    password_lpe = masked_input("Ingrese la Clave SOL LPE: ").strip()
+
+    if not usuario_lpg or not password_lpg or not usuario_lpe or not password_lpe:
+        console.print(
+            "\n[bold red][ERROR] Operación cancelada: ningún campo puede estar vacío.[/bold red]"
+        )
+        sys.exit(1)
+
+    keyring.set_password(SERVICIO, "USER_LPG", usuario_lpg)
+    keyring.set_password(SERVICIO, "PASS_LPG", password_lpg)
+    keyring.set_password(SERVICIO, "USER_LPE", usuario_lpe)
+    keyring.set_password(SERVICIO, "PASS_LPE", password_lpe)
+
+    console.print(
+            "\n[bold green]✔ [OK] Credenciales registradas exitosamente en el sistema.[/bold green]"
+        )
+    console.print(f"[dim]Namespace Regitrado :[/dim] [bold]{SERVICIO}[/bold]")
+
+    time.sleep(1)
+    sys.exit(0)
+except KeyboardInterrupt:
+    console.print(
+        "\n\n[bold yellow]Operación interrumpida por el usuario.[/bold yellow]"
+    )
+    sys.exit(1)
