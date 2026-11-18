@@ -20,10 +20,12 @@ from Utils import (
     print,
     add_log_console,
     add_log_file,
+    send_email_graph,
     export_df_to_excel,
     get_current_datetime,
     copy_items_to_folder,
     control_storage_day,
+    handle_remove_readonly,
     datetime,
     pd,
     remove_log,
@@ -52,6 +54,12 @@ SUNAT_CREDENTIALS = {
         "password": settings.SUNAT_PASSWORD_PROD_LPE,
     },
 }
+
+TENANT_ID = settings.TENANT_ID
+CLIENT_ID = settings.CLIENT_ID
+CLIENT_SECRET = settings.CLIENT_SECRET
+MAIL_BOX = settings.MAIL_BOX
+RECIPIENTS_MAIL_LIST = ["sebastian.espinoza@lapositiva.com.pe"]
 
 URL_LOGIN_SUNAT = (
     "https://api-seguridad.sunat.gob.pe/v1/clientessol/4f3b88b3-d9d6-402a-b85d-6a0bc857746a/oauth2/loginMenuSol"
@@ -261,7 +269,9 @@ class Robot_Sunat:
 
         is_company_valid = df_consolidado["EMPRESA"].isin(["LPG", "LPE"])
         is_ruc_valid = df_consolidado["RUC"].str.match(r"^\d{11}$")
+        rucs_invalids = {"20100210909", "20454073143", "20601978572"}
         fields_complete = (
+            (~df_consolidado["RUC"].isin(rucs_invalids)) &
             (df_consolidado["SERIEDOC"] != "")
             & (df_consolidado["SERIEDOC"].str.len() > 3)
             & (df_consolidado["NUMERODOC"] != "")
@@ -280,8 +290,10 @@ class Robot_Sunat:
             lambda row: (
                 "EMPRESA_VACÍA_O_INVÁLIDA"
                 if row["EMPRESA"] not in ("LPG", "LPE")
+                else "RUC_LA_POSITIVA_SE_DESCARTA"
+                if (row["RUC"] in rucs_invalids)
                 else "RUC_VACÍO_O_INVÁLIDO"
-                if not re.match(r"^\d{11}$", str(row["RUC"]))
+                if not re.match(r"^\d{11}$", row["RUC"])
                 else "SERIE_VACÍO_O_INVÁLIDO"
                 if (row["SERIEDOC"] == "" or len(row["SERIEDOC"]) <= 3)
                 else "NÚMERO_VACÍO_O_INVÁLIDO"
@@ -501,7 +513,7 @@ class Robot_Sunat:
         modal = frame.locator("div:has-text('Resultado'):visible").first
         modal.wait_for(state="visible", timeout=15000)
         
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1250)
 
         candidate_xmls = frame.locator(
             "button[title*='XML' i], a[title*='XML' i], "
@@ -627,6 +639,8 @@ class Robot_Sunat:
         return path_zip_local
 
     def Execute_Robot(self):
+        global MAX_RETRIES_PER_RECORD
+
         self.file_log_exists = start_log(self.path_logs, self.file_log_exists, False)
 
         if not self.Acquire_Lock():
@@ -649,6 +663,8 @@ class Robot_Sunat:
                 folder.mkdir(parents=True, exist_ok=True)
 
             self.Ingest_Cloud_Inputs()
+
+            logger.info("Iniciando Robot...")
 
             control_storage_day(
                 [
@@ -673,8 +689,11 @@ class Robot_Sunat:
                     / f"Comprobantes_Observados_{self.area}_{timestamp_actual}.xlsx"
                 )
                 export_df_to_excel(ruta_obs, df_observados[COLUMNS_FINAL])
+
+                copy_items_to_folder(self.path_folder_quarantine,self.path_folder_quarantine_cloud,True,False)
+                
                 logger.warning(
-                    f"[{self.area}] Se apartaron {len(df_observados)} registros observados en: {ruta_obs.name}"
+                    f"[{self.area}] Se guardó Excel con registros observados en OneDrive: {self.path_folder_quarantine_cloud.name}/{ruta_obs.name} ({len(df_observados)} filas)"
                 )
 
             if df_validos.empty:
@@ -697,7 +716,9 @@ class Robot_Sunat:
 
             map_xmls_locals = self.Index_XMLs_Locals()
 
+            contador_batch_bk = 0
             for idx, fila in df_lote_actual.iterrows():
+                contador_batch_bk += 1
                 ruc = str(fila["RUC"]).strip()
                 serie = str(fila["SERIEDOC"]).strip()
                 numero = str(fila["NUMERODOC"]).strip()
@@ -708,7 +729,7 @@ class Robot_Sunat:
                 file_exists = map_xmls_locals.get((serie, num_limpio))
                 if file_exists:
                     logger.info(
-                        f"[{contador_batch}/{total_rows}] OMITIENDO: {identificador_cpe} ya existe en disco ({file_exists})."
+                        f"[{contador_batch_bk}/{total_rows}] OMITIENDO: {identificador_cpe} ya existe en disco ({file_exists})."
                     )
                     df_lote_actual.at[idx, "ESTADO"] = "DESCARGADO"
                     df_lote_actual.at[idx, "DETALLE_ESTADO"] = (
@@ -725,6 +746,11 @@ class Robot_Sunat:
             if not df_pendientes_sunat.empty:
                 with sync_playwright() as p:
                     for current_company, df_grupo in df_pendientes_sunat.groupby("EMPRESA", sort=False):
+                        if current_company == "LPE":
+                            MAX_RETRIES_PER_RECORD = 4
+                        else:
+                            MAX_RETRIES_PER_RECORD = 3
+
                         logger.info(
                             f"[{self.area}] Iniciando bloque para empresa {current_company} ({len(df_grupo)} comprobantes)..."
                         )
@@ -904,10 +930,13 @@ class Robot_Sunat:
 
                                     try:
                                         if is_error_server:
+                                            logger.warning("Fallo crítico de servidor. Saltando directo a reinicio de navegador (Nivel 2)...")
                                             try:
                                                 context.close()
                                             except Exception:
                                                 pass
+                                            logger.info("Esperando unos segundos para que los servicios de SUNAT respondan...")
+                                            time.sleep(1.5)
                                             context, page, frame = self.Login_Sunat(p, current_company)
                                         else:
                                             context, page, frame = self.Recover_Screen_Restart(p, context, page, current_company)
@@ -956,6 +985,8 @@ class Robot_Sunat:
 
             timestamp_actual = datetime.now().strftime("%Y%m%d_%H%M%S")
             if not df_observados_sunat.empty:
+                if not self.path_folder_quarantine.exists():
+                    self.path_folder_quarantine.mkdir(parents=True, exist_ok=True)
                 ruta_obs_sunat = (
                     self.path_folder_quarantine
                     / f"Comprobantes_No_Descargados_SUNAT_{self.area}_{timestamp_actual}.xlsx"
@@ -1005,15 +1036,36 @@ class Robot_Sunat:
                 )
 
                 self.path_folder_xmls_zip.mkdir(parents=True, exist_ok=True)
-                zip_generado = self.Zip_Downloaded_XMLs(timestamp_actual)
+                self.zip_generado = self.Zip_Downloaded_XMLs(timestamp_actual)
 
-                if zip_generado and zip_generado.exists():
+                if self.zip_generado and self.zip_generado.exists():
+                    send_email_graph(
+                        TENANT_ID,
+                        CLIENT_ID,
+                        CLIENT_SECRET,
+                        MAIL_BOX,
+                        RECIPIENTS_MAIL_LIST,
+                        "Prueba Correo",
+                        "Dev",
+                        self.zip_generado,
+                        self.area
+                    )
                     copy_items_to_folder(self.path_folder_xmls_zip,self.path_folder_xmls_zip_cloud,True,False)
                     logger.info(
-                        f"[{self.area}] Se guardó Consolidado ZIP en OneDrive: {self.path_folder_xmls_zip_cloud}/{zip_generado.name}"
+                        f"[{self.area}] Se guardó Consolidado ZIP BK en OneDrive: {self.path_folder_xmls_zip_cloud}/{self.zip_generado.name}"
                     )
 
-                shutil.rmtree(self.path_folder_xmls, ignore_errors=True)
+                if self.path_folder_xmls.exists():
+                    try:
+                        shutil.rmtree(
+                            self.path_folder_xmls,
+                            ignore_errors=False,
+                            onexc=handle_remove_readonly,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[{self.area}] No se pudo eliminar la carpeta temporal {self.path_folder_xmls}: {e}"
+                        )
 
             self.Finish_Process(True)
         except Exception as e:

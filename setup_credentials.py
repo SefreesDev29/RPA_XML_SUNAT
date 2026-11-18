@@ -54,6 +54,10 @@ try:
     usuario_lpe = masked_input("Ingrese el Usuario SOL LPE: ").strip()
     password_lpe = masked_input("Ingrese la Clave SOL LPE: ").strip()
 
+    tenant_id = masked_input("Ingrese el Tenant ID: ").strip()
+    client_id = masked_input("Ingrese la Client ID: ").strip()
+    client_secret = masked_input("Ingrese la Client Secret (Value): ").strip()
+
     if not usuario_lpg or not password_lpg or not usuario_lpe or not password_lpe:
         console.print(
             "\n[bold red][ERROR] Operación cancelada: ningún campo puede estar vacío.[/bold red]"
@@ -64,6 +68,10 @@ try:
     keyring.set_password(SERVICIO, "PASS_LPG", password_lpg)
     keyring.set_password(SERVICIO, "USER_LPE", usuario_lpe)
     keyring.set_password(SERVICIO, "PASS_LPE", password_lpe)
+
+    keyring.set_password(SERVICIO, "TENANT_ID", tenant_id)
+    keyring.set_password(SERVICIO, "CLIENT_ID", client_id)
+    keyring.set_password(SERVICIO, "CLIENT_SECRET", client_secret)
 
     console.print(
             "\n[bold green]✔ [OK] Credenciales registradas exitosamente en el sistema.[/bold green]"

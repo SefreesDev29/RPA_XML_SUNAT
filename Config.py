@@ -19,10 +19,19 @@ class Settings(BaseSettings):
     SUNAT_USER_PROD_LPE: str
     SUNAT_PASSWORD_PROD_LPE: str
 
+    TENANT_ID: str
+    CLIENT_ID: str
+    CLIENT_SECRET: str
+    MAIL_BOX: str
+
     SUNAT_USER_PROD_LPG = keyring.get_password(SERVICIO, "USER_LPG")
     SUNAT_PASSWORD_PROD_LPG = keyring.get_password(SERVICIO, "PASS_LPG")
 
     SUNAT_USER_PROD_LPE = keyring.get_password(SERVICIO, "USER_LPE")
     SUNAT_PASSWORD_PROD_LPE = keyring.get_password(SERVICIO, "PASS_LPE")
+
+    TENANT_ID = keyring.get_password(SERVICIO, "TENANT_ID")
+    CLIENT_ID = keyring.get_password(SERVICIO, "CLIENT_ID")
+    CLIENT_SECRET = keyring.get_password(SERVICIO, "CLIENT_SECRET")
     
 settings = Settings()

@@ -1,4 +1,7 @@
+import os
+import stat
 import subprocess
+import time
 from datetime import datetime, date, timedelta
 import sys
 import shutil
@@ -133,29 +136,52 @@ def export_df_to_excel(path_file: Path, df: pd.DataFrame):
 
     writer.close()
 
-def copy_items_to_folder(path_folder_src: Path, path_folder_dtn: Path, clear_folder_src : bool = False, create_diff_folder_dtn : bool = False):
+def handle_remove_readonly(func, path: str, exc: BaseException) -> None:
+    if not isinstance(exc, PermissionError) or func not in (os.rmdir, os.unlink):
+        raise exc
+
+    os.chmod(path, stat.S_IWRITE)
+    for attempt in range(3):
+        try:
+            func(path)
+            return
+        except PermissionError:
+            if attempt == 2:
+                raise
+            time.sleep(0.2)
+
+def copy_items_to_folder(path_folder_src: Path, path_folder_dtn: Path, clear_folder_src : bool = False, create_diff_folder_dtn : bool = False):    
+    path_folder_dtn_new: Path = path_folder_dtn
+    
     if not path_folder_dtn.exists():
-        path_folder_dtn.mkdir(parents=True)
+        path_folder_dtn.mkdir(parents=True, exist_ok=True)
     else:
         if create_diff_folder_dtn:
             # hour_seconds = get_current_datetime()
             # path_folder_dtn = Path(str(path_folder_dtn) + "_" + hour_seconds.strftime("%H%M%S"))
-            path_items_list = (path_folder_dtn.name).split("_")
-            if len(path_items_list) == 2:
-                path_folder_dtn = path_folder_dtn.parent /  f"{path_folder_dtn.name}_2"
-            else:
-                suffix = int(path_items_list[2]) + 1
-                path_folder_dtn = path_folder_dtn.parent /  f"{path_items_list[1]}_{suffix}"
-            path_folder_dtn.mkdir()
+            path_folder_dtn_new = path_folder_dtn.parent /  f"{path_folder_dtn.name}_2"
+            if path_folder_dtn_new.exists():
+                path_folder_list = [
+                    int((subfolder.name).split("_")[2]) for subfolder in path_folder_dtn.parent.iterdir() 
+                    if subfolder.is_dir() and path_folder_dtn.name in subfolder.name 
+                    and len((subfolder.name).split("_")) > 2
+                ]
+                path_folder_list.sort(reverse=True)
+                suffix = path_folder_list[0] + 1
+                path_folder_dtn_new = path_folder_dtn.parent /  f"{path_folder_dtn.name}_{suffix}"
+            path_folder_dtn_new.mkdir(parents=True, exist_ok=True)
 
     for item in path_folder_src.iterdir():
-        dst_item = path_folder_dtn / item.name
+        dst_item = path_folder_dtn_new / item.name
 
         if not dst_item.exists():
             shutil.copy2(item, dst_item)
 
     if clear_folder_src:
-        shutil.rmtree(path_folder_src)
+        try:
+            shutil.rmtree(path_folder_src, ignore_errors=False, onexc=handle_remove_readonly)
+        except Exception as e:
+            logger.warning(f"No se pudo eliminar la carpeta temporal {path_folder_src}: {e}")
 
 def send_email_graph(
     tenant_id: str,
@@ -166,6 +192,7 @@ def send_email_graph(
     subject: str,
     body_text: str,
     path_file_zip: Path | None = None,
+    area: str | None = None,
 ) -> bool:
     authority = f"https://login.microsoftonline.com/{tenant_id}"
     app = msal.ConfidentialClientApplication(
@@ -215,10 +242,10 @@ def send_email_graph(
     response = requests.post(url_envio, headers=headers, json=payload)
 
     if response.status_code == 202:
-        logger.success(f"Correo enviado exitosamente a {recipients}.")
+        logger.info(f"[{area}] Correo enviado exitosamente a {recipients}.")
         return True
     else:
-        logger.error(f"Error al enviar correo ({response.status_code}): {response.text}")
+        logger.error(f"[{area}] Error al enviar correo ({response.status_code}): {response.text}")
         return False
 
 def cleanup_storage_onedrive(path_folder: Path) -> None:

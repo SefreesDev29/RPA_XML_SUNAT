@@ -13,6 +13,8 @@ from Utils import (
     print,
     add_log_console,
     add_log_file,
+    send_email_graph,
+    handle_remove_readonly,
     export_df_to_excel,
     get_current_datetime,
     copy_items_to_folder,
@@ -66,6 +68,12 @@ SUNAT_PASSWORD_PROD_LPG = settings.SUNAT_PASSWORD_PROD_LPG
 SUNAT_RUC_LPE = settings.SUNAT_RUC_LPE
 SUNAT_USER_PROD_LPE = settings.SUNAT_USER_PROD_LPE
 SUNAT_PASSWORD_PROD_LPE = settings.SUNAT_PASSWORD_PROD_LPE
+
+TENANT_ID = settings.TENANT_ID
+CLIENT_ID = settings.CLIENT_ID
+CLIENT_SECRET = settings.CLIENT_SECRET
+MAIL_BOX = settings.MAIL_BOX
+RECIPIENTS_MAIL_LIST = ["sebastian.espinoza@lapositiva.com.pe"]
 
 PATH_PERFIL_EDGE = PATH_GENERAL / "Perfil_Edge_Robot"
 
@@ -214,7 +222,11 @@ class Robot_Sunat:
             )
 
         is_ruc_valid = df_consolidado["RUC"].str.match(r"^\d{11}$")
+
+        rucs_invalids = {"20100210909", "20454073143", "20601978572"}
+
         fields_complete = (
+                (~df_consolidado["RUC"].isin(rucs_invalids)) &
                 (df_consolidado["SERIEDOC"] != "") & 
                 (df_consolidado["SERIEDOC"].str.len() > 3) & 
                 (df_consolidado["NUMERODOC"] != "")
@@ -232,7 +244,9 @@ class Robot_Sunat:
         df_observados["DETALLE_ESTADO"] = df_observados.apply(
             lambda row: (
                 "RUC_VACÍO_O_INVÁLIDO"
-                if not re.match(r"^\d{11}$", str(row["RUC"]))
+                if not re.match(r"^\d{11}$", row["RUC"])
+                else "RUC_LA_POSITIVA_SE_DESCARTA"
+                if (row["RUC"] in rucs_invalids)
                 else "SERIE_VACÍO_O_INVÁLIDO"
                 if (row["SERIEDOC"] == "" or len(row["SERIEDOC"]) <= 3)
                 else "NÚMERO_VACÍO_O_INVÁLIDO"
@@ -428,7 +442,7 @@ class Robot_Sunat:
         modal = frame.locator("div:has-text('Resultado'):visible").first
         modal.wait_for(state="visible", timeout=15000)
 
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1250)
 
         candidate_xmls = frame.locator(
             "button[title*='XML' i], a[title*='XML' i], "
@@ -600,7 +614,12 @@ class Robot_Sunat:
                     PATH_FOLDER_QUARANTINE / f"Comprobantes_Observados_{timestamp_actual}.xlsx"
                 )
                 export_df_to_excel(ruta_obs,df_observados[COLUMNS_FINAL])
-                logger.warning(f"Se apartó {len(df_observados)} registros observados en: {ruta_obs.name}...")
+
+                copy_items_to_folder(PATH_FOLDER_QUARANTINE,PATH_FOLDER_QUARANTINE_CLOUD,True,False)
+                
+                logger.warning(
+                    f"Se guardó Excel con registros observados en OneDrive: {PATH_FOLDER_QUARANTINE_CLOUD.name}/{ruta_obs.name} ({len(df_observados)} filas)"
+                )
 
             if df_validos.empty:
                 raise Exception(f"No se encontraron registros válidos para procesar.\nUbicación Carpeta: {PATH_FOLDER_INPUTS}")
@@ -827,6 +846,8 @@ class Robot_Sunat:
                                             context.close()
                                         except Exception:
                                             pass
+                                        logger.info("Esperando unos segundos para que los servicios de SUNAT respondan...")
+                                        time.sleep(1.5)
                                         context, page, frame = self.Login_Sunat(p)
                                     else:
                                         context, page, frame = self.Recover_Screen_Restart(p, context, page)
@@ -892,6 +913,9 @@ class Robot_Sunat:
 
             timestamp_actual = datetime.now().strftime("%Y%m%d_%H%M%S")
             if not df_observados_sunat.empty:
+                if not PATH_FOLDER_QUARANTINE.exists():
+                    PATH_FOLDER_QUARANTINE.mkdir(parents=True, exist_ok=True)
+
                 ruta_obs_sunat = (
                     PATH_FOLDER_QUARANTINE
                     / f"Comprobantes_No_Descargados_SUNAT_{timestamp_actual}.xlsx"
@@ -945,15 +969,36 @@ class Robot_Sunat:
 
                 PATH_FOLDER_XMLS_ZIP.mkdir(parents=True, exist_ok=True)
 
-                zip_generado = self.Zip_Downloaded_XMLs(timestamp_actual)
+                self.zip_generado = self.Zip_Downloaded_XMLs(timestamp_actual)
 
-                if zip_generado and zip_generado.exists():
+                if self.zip_generado and self.zip_generado.exists():
+                    send_email_graph(
+                        TENANT_ID,
+                        CLIENT_ID,
+                        CLIENT_SECRET,
+                        MAIL_BOX,
+                        RECIPIENTS_MAIL_LIST,
+                        "Prueba Correo",
+                        "Dev",
+                        self.zip_generado,
+                        "OPERACIONES"
+                    )
                     copy_items_to_folder(PATH_FOLDER_XMLS_ZIP, PATH_FOLDER_XMLS_ZIP_CLOUD, True, False)
                     logger.info(
-                        f"Se guardó Consolidado ZIP en OneDrive: {PATH_FOLDER_XMLS_ZIP_CLOUD}/{zip_generado.name}"
+                        f"Se guardó Consolidado ZIP en OneDrive: {PATH_FOLDER_XMLS_ZIP_CLOUD}/{self.zip_generado.name}"
                     )
 
-            shutil.rmtree(PATH_FOLDER_XMLS.parent, ignore_errors=True)
+            if self.PATH_FOLDER_XMLS.exists():
+                try:
+                    shutil.rmtree(
+                        self.path_folder_xmls,
+                        ignore_errors=False,
+                        onexc=handle_remove_readonly,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.area}] No se pudo eliminar la carpeta temporal {self.path_folder_xmls}: {e}"
+                    )
 
             self.Finish_Process(True)
         except Exception as e:
@@ -967,6 +1012,16 @@ class Robot_Sunat:
         END_TIME = get_current_datetime()
 
         if is_success:
+            send_email_graph(
+                TENANT_ID,
+                CLIENT_ID,
+                CLIENT_SECRET,
+                MAIL_BOX,
+                RECIPIENTS_MAIL_LIST,
+                "Prueba Correo",
+                "Dev",
+                None
+            )
             logger.success("Ejecución exitosa: Se procesó la información.")
             close_rule = lambda: console.rule("[grey66]Proceso Finalizado[/grey66]")
             exit_code = 0
