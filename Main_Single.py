@@ -1,5 +1,6 @@
 import random
 import re
+# import numpy as np
 import time
 import zipfile
 from rich.console import Console
@@ -14,7 +15,8 @@ from Utils import (
     add_log_console,
     add_log_file,
     send_email_graph,
-    handle_remove_readonly,
+    remove_temporal_folder,
+    build_sunat_email_html,
     export_df_to_excel,
     get_current_datetime,
     copy_items_to_folder,
@@ -65,15 +67,13 @@ SUNAT_RUC_LPG = settings.SUNAT_RUC_LPG
 SUNAT_USER_PROD_LPG = settings.SUNAT_USER_PROD_LPG
 SUNAT_PASSWORD_PROD_LPG = settings.SUNAT_PASSWORD_PROD_LPG
 
-SUNAT_RUC_LPE = settings.SUNAT_RUC_LPE
-SUNAT_USER_PROD_LPE = settings.SUNAT_USER_PROD_LPE
-SUNAT_PASSWORD_PROD_LPE = settings.SUNAT_PASSWORD_PROD_LPE
+RUC_INVALID_SUNAT_SET = {settings.SUNAT_RUC_LPG}
 
 TENANT_ID = settings.TENANT_ID
 CLIENT_ID = settings.CLIENT_ID
 CLIENT_SECRET = settings.CLIENT_SECRET
 MAIL_BOX = settings.MAIL_BOX
-RECIPIENTS_MAIL_LIST = ["sebastian.espinoza@lapositiva.com.pe"]
+RECIPIENTS_MAIL_LIST = settings.RECIPIENTS_MAIL_LIST
 
 PATH_PERFIL_EDGE = PATH_GENERAL / "Perfil_Edge_Robot"
 
@@ -97,7 +97,7 @@ MAP_TYPES_CPE = {
     "03": "Boleta de Venta",
     "07": "Factura - Nota de Crédito",
     "08": "Factura - Nota de Débito",
-    "R1": "Recibo por Honorarios",
+    "02": "Recibo por Honorarios",
 }
 
 COLUMNS_FINAL = ["ARCHIVO_ORIGEN", "EMPRESA", "#EXP", "RUC", "COD_DCMNTO", "TPO_DCMNTO", "SERIEDOC", "NUMERODOC", "RAZON_SOCIAL", "ESTADO", "DETALLE_ESTADO", "FECHA_PROCESO"]
@@ -131,18 +131,32 @@ class Robot_Sunat:
         if not PATH_FOLDER_XMLS.exists():
             return indice_xmls
 
+        patron_estandar = re.compile(r"^(\d{11})-\d{2}-([A-Za-z0-9]{4})-(\d+)\.xml$", re.IGNORECASE)
         patron_cpe = re.compile(r"([A-Za-z0-9]{4})-(\d+)\.xml$", re.IGNORECASE)
 
         for archivo in PATH_FOLDER_XMLS.glob("*.xml"):
             nombre = archivo.name
+
+            match_std = patron_estandar.match(nombre)
+            if match_std:
+                ruc_archivo = match_std.group(1)
+                serie_archivo = self.Normalize_Serie(match_std.group(2))
+                numero_archivo = str(int(match_std.group(3)))
+                indice_xmls[(ruc_archivo, serie_archivo, numero_archivo)] = (
+                    nombre
+                )
+                continue
+
             match = patron_cpe.search(nombre)
             if match:
                 serie_archivo = self.Normalize_Serie(
                     match.group(1).upper().strip()
                 )
                 numero_raw = match.group(2).strip()
+                ruc_archivo = ""
 
                 if len(numero_raw) > 11:
+                    ruc_archivo = numero_raw[-11:]
                     numero_raw = numero_raw[:-11]
 
                 numero_archivo = (
@@ -150,7 +164,7 @@ class Robot_Sunat:
                     if numero_raw.isdigit()
                     else numero_raw
                 )
-                indice_xmls[(serie_archivo, numero_archivo)] = nombre
+                indice_xmls[(ruc_archivo, serie_archivo, numero_archivo)] = nombre
 
         logger.info(
             f"Índice local cargado: {len(indice_xmls)} XMLs encontrados previamente en disco."
@@ -206,7 +220,7 @@ class Robot_Sunat:
 
         df_consolidado = pd.concat(dfs, ignore_index=True)
 
-        df_consolidado["RUC"] = df_consolidado["RUC"].str.replace(" ", "").replace(",", "").str.split(".").str[0]
+        df_consolidado["RUC"] = df_consolidado["RUC"].str.replace(" ", "", regex=False).str.replace(",", "", regex=False).str.split(".").str[0]
         df_consolidado["SERIEDOC"] = df_consolidado["SERIEDOC"].apply(self.Normalize_Serie)
         df_consolidado["COD_DCMNTO"] = df_consolidado["COD_DCMNTO"].apply(
             lambda x: str(x).zfill(2) if str(x).isdigit() and len(str(x)) == 1 else x
@@ -223,10 +237,8 @@ class Robot_Sunat:
 
         is_ruc_valid = df_consolidado["RUC"].str.match(r"^\d{11}$")
 
-        rucs_invalids = {"20100210909", "20454073143", "20601978572"}
-
         fields_complete = (
-                (~df_consolidado["RUC"].isin(rucs_invalids)) &
+                (~df_consolidado["RUC"].isin(RUC_INVALID_SUNAT_SET)) &
                 (df_consolidado["SERIEDOC"] != "") & 
                 (df_consolidado["SERIEDOC"].str.len() > 3) & 
                 (df_consolidado["NUMERODOC"] != "")
@@ -241,18 +253,47 @@ class Robot_Sunat:
         df_validos["FECHA_PROCESO"] = pd.Timestamp.now()
 
         df_observados["ESTADO"] = "OBSERVADO"
-        df_observados["DETALLE_ESTADO"] = df_observados.apply(
-            lambda row: (
-                "RUC_VACÍO_O_INVÁLIDO"
-                if not re.match(r"^\d{11}$", row["RUC"])
-                else "RUC_LA_POSITIVA_SE_DESCARTA"
-                if (row["RUC"] in rucs_invalids)
-                else "SERIE_VACÍO_O_INVÁLIDO"
-                if (row["SERIEDOC"] == "" or len(row["SERIEDOC"]) <= 3)
-                else "NÚMERO_VACÍO_O_INVÁLIDO"
-            ),
-            axis=1
-        )
+        if df_observados.empty:
+            df_observados["DETALLE_ESTADO"] = ""
+        else:
+            df_observados["DETALLE_ESTADO"] = df_observados.apply(
+                lambda row: (
+                    "RUC_VACÍO_O_INVÁLIDO"
+                    if not re.match(r"^\d{11}$", row["RUC"])
+                    else "RUC_LA_POSITIVA_SE_DESCARTA"
+                    if (row["RUC"] in RUC_INVALID_SUNAT_SET)
+                    else "SERIE_VACÍO_O_INVÁLIDO"
+                    if (row["SERIEDOC"] == "" or len(row["SERIEDOC"]) <= 3)
+                    else "NÚMERO_VACÍO_O_INVÁLIDO"
+                ),
+                axis=1
+            )
+
+        # cond_ruc_invalido = ~df_consolidado["RUC"].str.match(r"^\d{11}$")
+        # cond_ruc_descartado = df_consolidado["RUC"].isin(RUC_INVALID_SUNAT_SET)
+        # cond_serie_invalida = df_consolidado["SERIEDOC"].str.len() <= 3
+        # cond_numero_invalido = df_consolidado["NUMERODOC"] == ""
+
+        # mask_valid = ~(
+        #     cond_ruc_invalido
+        #     | cond_ruc_descartado
+        #     | cond_serie_invalida
+        #     | cond_numero_invalido
+        # )
+
+        # df_observados["DETALLE_ESTADO"] = np.select(
+        #     condlist=[
+        #         cond_ruc_invalido[~mask_valid],
+        #         cond_ruc_descartado[~mask_valid],
+        #         cond_serie_invalida[~mask_valid],
+        #     ],
+        #     choicelist=[
+        #         "RUC_VACÍO_O_INVÁLIDO",
+        #         "RUC_LA_POSITIVA_SE_DESCARTA",
+        #         "SERIE_VACÍO_O_INVÁLIDO",
+        #     ],
+        #     default="NÚMERO_VACÍO_O_INVÁLIDO",
+        # )
         df_observados["FECHA_PROCESO"] = pd.Timestamp.now()
 
         return df_validos, df_observados, excel_files
@@ -648,7 +689,7 @@ class Robot_Sunat:
                     logger.error(
                         f"Se presentó problemas al iniciar sesión en el portal SUNAT.\n{sce}"
                     )
-                    context, page, frame = None, None, None, None
+                    context, page, frame = None, None, None
                     sunat_colapse = True
                 
                 contador_batch = 0
@@ -657,7 +698,7 @@ class Robot_Sunat:
                     for idx, fila in df_lote_actual.iterrows():
                         contador_batch += 1
                         filtro = (
-                            str(fila.get("filtro", "Recibido")).strip().capitalize()
+                            str(fila.get("FILTRO", "Recibido")).strip().capitalize()
                             or "Recibido"
                         )
 
@@ -672,14 +713,14 @@ class Robot_Sunat:
 
                         identificador_cpe = f"{serie}-{numero} (RUC: {ruc})"
 
-                        archivo_existente = map_xmls_locals.get((serie, num_limpio))
-                        if archivo_existente:
+                        file_exists = map_xmls_locals.get((ruc, serie, num_limpio)) or map_xmls_locals.get(("", serie, num_limpio))
+                        if file_exists:
                             logger.info(
-                                f"[{contador_batch}/{total_rows}] OMITIENDO: {identificador_cpe} ya existe en disco ({archivo_existente})."
+                                f"[{contador_batch}/{total_rows}] OMITIENDO: {identificador_cpe} ya existe en disco ({file_exists})."
                             )
                             df_lote_actual.at[idx, "ESTADO"] = "DESCARGADO"
                             df_lote_actual.at[idx, "DETALLE_ESTADO"] = (
-                                f"RECUPERADO_LOCAL_PREVIO: {archivo_existente}"
+                                f"RECUPERADO_LOCAL_PREVIO: {file_exists}"
                             )
                             df_lote_actual.at[idx, "FECHA_PROCESO"] = (
                                 pd.Timestamp.now()
@@ -950,6 +991,8 @@ class Robot_Sunat:
             else:
                 logger.info("Se descargó los XMLs de todos los comprobantes. Carpeta Inputs limpia...")
 
+            email_failed = True
+
             timestamp_actual = datetime.now().strftime("%Y%m%d_%H%M%S")
             if not df_descargados.empty:
                 ruta_proc = PATH_FOLDER_PROCESSED / f"Comprobantes_Descargados_{timestamp_actual}.xlsx"
@@ -972,35 +1015,45 @@ class Robot_Sunat:
                 self.zip_generado = self.Zip_Downloaded_XMLs(timestamp_actual)
 
                 if self.zip_generado and self.zip_generado.exists():
-                    send_email_graph(
+                    body_html = build_sunat_email_html(
+                        "Siniestros",
+                        self.period_time,
+                        len(df_descargados),
+                        len(df_descargados),
+                        self.zip_generado.name,
+                        ["LPG"],
+                        1,
+                        1,
+                    )
+                    
+                    email_sent = send_email_graph(
                         TENANT_ID,
                         CLIENT_ID,
                         CLIENT_SECRET,
                         MAIL_BOX,
                         RECIPIENTS_MAIL_LIST,
-                        "Prueba Correo",
-                        "Dev",
+                        f"ROBOT SUNAT XML | Lote {self.period_time} ({len(df_descargados)} XMLs)",
+                        body_html,
                         self.zip_generado,
                         "OPERACIONES"
                     )
-                    copy_items_to_folder(PATH_FOLDER_XMLS_ZIP, PATH_FOLDER_XMLS_ZIP_CLOUD, True, False)
+                    if email_sent:
+                        email_failed = False
+                    copy_items_to_folder(PATH_FOLDER_XMLS_ZIP, PATH_FOLDER_XMLS_ZIP_CLOUD,True,False)
                     logger.info(
                         f"Se guardó Consolidado ZIP en OneDrive: {PATH_FOLDER_XMLS_ZIP_CLOUD}/{self.zip_generado.name}"
                     )
 
-            if self.PATH_FOLDER_XMLS.exists():
-                try:
-                    shutil.rmtree(
-                        self.path_folder_xmls,
-                        ignore_errors=False,
-                        onexc=handle_remove_readonly,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"[{self.area}] No se pudo eliminar la carpeta temporal {self.path_folder_xmls}: {e}"
-                    )
+                if PATH_FOLDER_XMLS.exists():
+                    remove_temporal_folder(PATH_FOLDER_XMLS)
 
-            self.Finish_Process(True)
+            if email_failed:
+                self.Finish_Process(
+                    False,
+                    "XMLs descargados y respaldados en OneDrive, pero falló el envío de correo.",
+                )
+            else:
+                self.Finish_Process(True)
         except Exception as e:
             self.Finish_Process(False, str(e))
         finally:
@@ -1012,16 +1065,6 @@ class Robot_Sunat:
         END_TIME = get_current_datetime()
 
         if is_success:
-            send_email_graph(
-                TENANT_ID,
-                CLIENT_ID,
-                CLIENT_SECRET,
-                MAIL_BOX,
-                RECIPIENTS_MAIL_LIST,
-                "Prueba Correo",
-                "Dev",
-                None
-            )
             logger.success("Ejecución exitosa: Se procesó la información.")
             close_rule = lambda: console.rule("[grey66]Proceso Finalizado[/grey66]")
             exit_code = 0

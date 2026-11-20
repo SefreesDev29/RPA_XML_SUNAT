@@ -1,7 +1,7 @@
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 import keyring
-# from pydantic import computed_field
 
 AMBIENTE = os.getenv("APP_ENV", "DEV").upper()
 SERVICIO = f"RPA_SUNAT_{AMBIENTE}"
@@ -23,6 +23,30 @@ class Settings(BaseSettings):
     CLIENT_ID: str
     CLIENT_SECRET: str
     MAIL_BOX: str
+
+    RECIPIENTS_MAIL_LIST: str | list[str]
+
+    @field_validator("RECIPIENTS_MAIL_LIST", mode="after")
+    @classmethod
+    def parse_recipients(cls, v: str | list[str]) -> list[str]:
+        if isinstance(v, str):
+            correos = [
+                c.strip() for c in v.replace("|", ",").split(",") if c.strip()
+            ]
+        else:
+            correos = [str(c).strip() for c in v if str(c).strip()]
+
+        if not correos:
+            raise ValueError(
+                "RECIPIENTS_MAIL_LIST debe contener al menos un correo válido."
+            )
+        return correos
+
+    QUOTA_MORNING: int = 500
+    QUOTA_AFTERNOON: int = 500
+    QUOTA_NIGHT: int = 1000
+    MAX_DAILY_QUOTA: int = 2000
+    MAX_ZIP_SIZE_MB: float = 2.5
 
     SUNAT_USER_PROD_LPG = keyring.get_password(SERVICIO, "USER_LPG")
     SUNAT_PASSWORD_PROD_LPG = keyring.get_password(SERVICIO, "PASS_LPG")

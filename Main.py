@@ -2,6 +2,8 @@ import multiprocessing
 import random
 import re
 import time
+import io
+import json
 import zipfile
 from typing import Callable
 from rich.console import Console
@@ -21,21 +23,28 @@ from Utils import (
     add_log_console,
     add_log_file,
     send_email_graph,
+    build_sunat_email_html,
     export_df_to_excel,
     get_current_datetime,
     copy_items_to_folder,
     control_storage_day,
-    handle_remove_readonly,
+    remove_temporal_folder,
     datetime,
     pd,
     remove_log,
     show_custom_rule,
     start_log,
+    is_pid_running,
+    os,
     sys,
     shutil,
 )
 
-PATH_GENERAL = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False): 
+    PATH_GENERAL = Path(sys.executable).resolve().parent  
+else:
+    PATH_GENERAL = Path(__file__).resolve().parent 
+
 PATH_GENERAL_CLOUD = Path(
     settings.PATH_CLOUD
 )
@@ -55,11 +64,13 @@ SUNAT_CREDENTIALS = {
     },
 }
 
+RUC_INVALID_SUNAT_SET = {settings.SUNAT_RUC_LPG, settings.SUNAT_RUC_LPE}
+
 TENANT_ID = settings.TENANT_ID
 CLIENT_ID = settings.CLIENT_ID
 CLIENT_SECRET = settings.CLIENT_SECRET
 MAIL_BOX = settings.MAIL_BOX
-RECIPIENTS_MAIL_LIST = ["sebastian.espinoza@lapositiva.com.pe"]
+RECIPIENTS_MAIL_LIST = settings.RECIPIENTS_MAIL_LIST
 
 URL_LOGIN_SUNAT = (
     "https://api-seguridad.sunat.gob.pe/v1/clientessol/4f3b88b3-d9d6-402a-b85d-6a0bc857746a/oauth2/loginMenuSol"
@@ -68,7 +79,12 @@ URL_LOGIN_SUNAT = (
     "&state=rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcAUH2sHDFmDRAwACRgAKbG9hZEZhY3RvckkACXRocmVzaG9sZHhwP0AAAAAAAAx3CAAAABAAAAADdAADZXhlcHQABnBhcmFtc3QASyomKiYvY2wtdGktaXRtZW51L01lbnVJbnRlcm5ldC5odG0mYjY0ZDI2YThiNWFmMDkxOTIzYjIzYjY0MDdhMWMxZGI0MWU3MzNhNnQABGV4ZWNweA=="
 )
 
-MAX_RECORDS_PER_RUN = 1500
+QUOTA_MORNING = settings.QUOTA_MORNING
+QUOTA_AFTERNOON = settings.QUOTA_AFTERNOON
+QUOTA_NIGHT = settings.QUOTA_NIGHT
+MAX_DAILY_QUOTA = settings.MAX_DAILY_QUOTA
+MAX_ZIP_SIZE_MB = settings.MAX_ZIP_SIZE_MB
+
 BREAK_MIN_CALL = 2.0
 BREAK_MAX_CALL = 2.0
 BATCH_SIZE = 500
@@ -81,7 +97,7 @@ MAP_TYPES_CPE = {
     "03": "Boleta de Venta",
     "07": "Factura - Nota de Crédito",
     "08": "Factura - Nota de Débito",
-    "R1": "Recibo por Honorarios",
+    "02": "Recibo por Honorarios",
 }
 
 COLUMNS_FINAL = ["ARCHIVO_ORIGEN", "EMPRESA", "#EXP", "RUC", "COD_DCMNTO", "TPO_DCMNTO", "SERIEDOC", "NUMERODOC", "RAZON_SOCIAL", "ESTADO", "DETALLE_ESTADO", "FECHA_PROCESO"]
@@ -114,6 +130,7 @@ class Robot_Sunat:
 
         self.path_perfil_edge = self.path_area_local / "Perfil_Edge"
         self.path_lock_file = self.path_area_local / f"Robot_{self.area}.lock"
+        self.path_quota_file = self.path_area_local / f"Cuota_Diaria_{self.period_time}.json"
         self.path_onedrive_lock = self.path_area_local / f"onedrive_cleanup_{self.area}.lock"
 
         self.path_folder_logs = PATH_GENERAL / "Logs"
@@ -122,17 +139,62 @@ class Robot_Sunat:
 
         self.Execute_Robot()
 
+    def _write_lock_atomic(self) -> bool:
+        content = f"{os.getpid()}|{time.time()}".encode("utf-8")
+        try:
+            fd = os.open(
+                str(self.path_lock_file),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+            try:
+                os.write(fd, content)
+            finally:
+                os.close(fd)
+            return True
+        except FileExistsError:
+            return False
+
     def Acquire_Lock(self) -> bool:
         self.path_area_local.mkdir(parents=True, exist_ok=True)
-        if self.path_lock_file.exists():
-            tiempo_creacion = self.path_lock_file.stat().st_mtime
-            if time.time() - tiempo_creacion > 12600:
-                self.path_lock_file.unlink(missing_ok=True)
-            else:
+
+        if self._write_lock_atomic():
+            return True
+
+        try:
+            contenido_raw = self.path_lock_file.read_text(
+                encoding="utf-8"
+            ).strip()
+            pid_guardado = int(contenido_raw.split("|")[0])
+            tiempo_transcurrido = (
+                time.time() - self.path_lock_file.stat().st_mtime
+            )
+
+            proceso_vivo = is_pid_running(pid_guardado)
+
+            if proceso_vivo and tiempo_transcurrido <= 12600:
+                logger.warning(
+                    f"[{self.area}] Bloqueo activo por PID {pid_guardado} "
+                    f"(en ejecución hace {int(tiempo_transcurrido // 60)} min)."
+                )
                 return False
 
-        self.path_lock_file.write_text(str(time.time()), encoding="utf-8")
-        return True
+            motivo = (
+                f"PID {pid_guardado} ya no existe en Windows"
+                if not proceso_vivo
+                else "superó el tiempo máximo de 3.5 horas"
+            )
+            logger.warning(
+                f"[{self.area}] Detectado lock huérfano ({motivo}). Liberando..."
+            )
+            self.path_lock_file.unlink(missing_ok=True)
+
+        except Exception as e:
+            logger.warning(
+                f"[{self.area}] Lock ilegible ({e}). Reemplazando..."
+            )
+            self.path_lock_file.unlink(missing_ok=True)
+
+        return self._write_lock_atomic()
 
     def Release_Lock(self) -> None:
         self.path_lock_file.unlink(missing_ok=True)
@@ -161,29 +223,43 @@ class Robot_Sunat:
             if not dst_item_input.exists():
                 shutil.move(item, dst_item_input)
 
-    def Index_XMLs_Locals(self) -> dict[tuple[str, str], str]:
+    def Index_XMLs_Locals(self) -> dict[tuple[str, str], str]:  
         indice_xmls: dict[tuple[str, str], str] = {}
         if not self.path_folder_xmls.exists():
             return indice_xmls
 
+        patron_estandar = re.compile(r"^(\d{11})-\d{2}-([A-Za-z0-9]{4})-(\d+)\.xml$", re.IGNORECASE)
         patron_cpe = re.compile(r"([A-Za-z0-9]{4})-(\d+)\.xml$", re.IGNORECASE)
 
         for archivo in self.path_folder_xmls.glob("*.xml"):
             nombre = archivo.name
+
+            match_std = patron_estandar.match(nombre)
+            if match_std:
+                ruc_archivo = match_std.group(1)
+                serie_archivo = self.Normalize_Serie(match_std.group(2))
+                numero_archivo = str(int(match_std.group(3)))
+                indice_xmls[(ruc_archivo, serie_archivo, numero_archivo)] = (
+                    nombre
+                )
+                continue
+
             match = patron_cpe.search(nombre)
             if match:
                 serie_archivo = self.Normalize_Serie(
                     match.group(1).upper().strip()
                 )
                 numero_raw = match.group(2).strip()
+                ruc_archivo = ""
 
                 if len(numero_raw) > 11:
+                    ruc_archivo = numero_raw[-11:]
                     numero_raw = numero_raw[:-11]
 
                 numero_archivo = (
                     str(int(numero_raw)) if numero_raw.isdigit() else numero_raw
                 )
-                indice_xmls[(serie_archivo, numero_archivo)] = nombre
+                indice_xmls[(ruc_archivo, serie_archivo, numero_archivo)] = nombre
 
         logger.info(
             f"[{self.area}] Índice local cargado: {len(indice_xmls)} XMLs encontrados previamente en disco."
@@ -252,7 +328,7 @@ class Robot_Sunat:
         df_consolidado = pd.concat(dfs, ignore_index=True)
 
 
-        df_consolidado["RUC"] = df_consolidado["RUC"].str.replace(" ", "").replace(",", "").str.split(".").str[0]
+        df_consolidado["RUC"] = df_consolidado["RUC"].str.replace(" ", "", regex=False).str.replace(",", "", regex=False).str.split(".").str[0]
         df_consolidado["SERIEDOC"] = df_consolidado["SERIEDOC"].apply(self.Normalize_Serie)
         df_consolidado["COD_DCMNTO"] = df_consolidado["COD_DCMNTO"].apply(
             lambda x: str(x).zfill(2) if str(x).isdigit() and len(str(x)) == 1 else x
@@ -269,9 +345,8 @@ class Robot_Sunat:
 
         is_company_valid = df_consolidado["EMPRESA"].isin(["LPG", "LPE"])
         is_ruc_valid = df_consolidado["RUC"].str.match(r"^\d{11}$")
-        rucs_invalids = {"20100210909", "20454073143", "20601978572"}
         fields_complete = (
-            (~df_consolidado["RUC"].isin(rucs_invalids)) &
+            (~df_consolidado["RUC"].isin(RUC_INVALID_SUNAT_SET)) &
             (df_consolidado["SERIEDOC"] != "")
             & (df_consolidado["SERIEDOC"].str.len() > 3)
             & (df_consolidado["NUMERODOC"] != "")
@@ -286,20 +361,23 @@ class Robot_Sunat:
         df_validos["FECHA_PROCESO"] = pd.Timestamp.now()
 
         df_observados["ESTADO"] = "OBSERVADO"
-        df_observados["DETALLE_ESTADO"] = df_observados.apply(
-            lambda row: (
-                "EMPRESA_VACÍA_O_INVÁLIDA"
-                if row["EMPRESA"] not in ("LPG", "LPE")
-                else "RUC_LA_POSITIVA_SE_DESCARTA"
-                if (row["RUC"] in rucs_invalids)
-                else "RUC_VACÍO_O_INVÁLIDO"
-                if not re.match(r"^\d{11}$", row["RUC"])
-                else "SERIE_VACÍO_O_INVÁLIDO"
-                if (row["SERIEDOC"] == "" or len(row["SERIEDOC"]) <= 3)
-                else "NÚMERO_VACÍO_O_INVÁLIDO"
-            ),
-            axis=1,
-        )
+        if df_observados.empty:
+            df_observados["DETALLE_ESTADO"] = ""
+        else:
+            df_observados["DETALLE_ESTADO"] = df_observados.apply(
+                lambda row: (
+                    "EMPRESA_VACÍA_O_INVÁLIDA"
+                    if row["EMPRESA"] not in ("LPG", "LPE")
+                    else "RUC_LA_POSITIVA_SE_DESCARTA"
+                    if (row["RUC"] in RUC_INVALID_SUNAT_SET)
+                    else "RUC_VACÍO_O_INVÁLIDO"
+                    if not re.match(r"^\d{11}$", row["RUC"])
+                    else "SERIE_VACÍO_O_INVÁLIDO"
+                    if (row["SERIEDOC"] == "" or len(row["SERIEDOC"]) <= 3)
+                    else "NÚMERO_VACÍO_O_INVÁLIDO"
+                ),
+                axis=1,
+            )
         df_observados["FECHA_PROCESO"] = pd.Timestamp.now()
 
         return df_validos, df_observados, excel_files
@@ -340,11 +418,13 @@ class Robot_Sunat:
                     ],
                 )
 
+                context.clear_cookies()
                 page = context.pages[0] if context.pages else context.new_page()
 
                 page.goto(URL_LOGIN_SUNAT, wait_until="networkidle", timeout=30000)
 
                 field_ruc = page.get_by_role("textbox", name="RUC")
+                field_ruc.wait_for(state="visible", timeout=30000)
                 field_ruc.click()
                 field_ruc.press_sequentially(creds["ruc"], delay=5)
 
@@ -373,9 +453,19 @@ class Robot_Sunat:
                     ("#nivel4_11_38_1_1_1", "Nueva Consulta de Comprobantes"),
                 ]
 
-                for selector, _ in tree_menu:
+                for selector, fallback_text in tree_menu:
                     nodo = page.locator(selector)
-                    nodo.wait_for(state="visible", timeout=10000)
+                    try:
+                        nodo.wait_for(state="visible", timeout=10000)
+                    except Exception:
+                        if fallback_text:
+                            logger.warning(
+                                f"[{self.area} | {company}] Selector {selector} no visible, usando fallback de texto '{fallback_text}'."
+                            )
+                            nodo = page.get_by_text(fallback_text).first
+                            nodo.wait_for(state="visible", timeout=10000)
+                        else:
+                            raise
                     nodo.click()
                     page.wait_for_timeout(100)
 
@@ -445,7 +535,9 @@ class Robot_Sunat:
         logger.warning(f"[{self.area} | {company}] Iniciando protocolo de recuperación de pantalla...")
 
         try:
-            btn_new_search = page.locator("#nivel4_11_38_1_1_1").first
+            btn_new_search = page.locator("#nivel4_11_38_1_1_1").or_(
+                page.get_by_text("Nueva Consulta de")
+            ).first
             if btn_new_search.is_visible():
                 btn_new_search.click(timeout=5000)
                 page.wait_for_timeout(1500)
@@ -616,27 +708,130 @@ class Robot_Sunat:
                     extracted_xmls.append(filename)
         return extracted_xmls
 
-    def Zip_Downloaded_XMLs(self, timestamp: str) -> Path | None:
-        files_xml = list(self.path_folder_xmls.glob("*.xml"))
-        if not files_xml:
-            logger.warning(f"[{self.area}] No se encontraron archivos XML para empaquetar en el ZIP de correo.")
-            return None
+    def Get_Dynamic_Quota(self) -> int:
+        for old_quota in self.path_area_local.glob("Cuota_Diaria_*.json"):
+            if old_quota.name != self.path_quota_file.name:
+                old_quota.unlink(missing_ok=True)
 
-        name_zip = f"XMLs_SUNAT_{self.area}_{timestamp}.zip"
-        path_zip_local = self.path_folder_xmls_zip / name_zip
+        download_today = 0
+        if self.path_quota_file.exists():
+            try:
+                data = json.loads(
+                    self.path_quota_file.read_text(encoding="utf-8")
+                )
+                download_today = int(data.get("descargados_hoy", 0))
+            except Exception as e:
+                logger.warning(
+                    f"[{self.area}] No se pudo leer {self.path_quota_file.name}, iniciando en 0: {e}"
+                )
 
-        with zipfile.ZipFile(
-            path_zip_local, "w", compression=zipfile.ZIP_DEFLATED
-        ) as zip_out:
-            for xml_file in files_xml:
-                zip_out.write(xml_file, arcname=xml_file.name)
+        today_hour = get_current_datetime().hour
+        if today_hour < 12:
+            time_slot = "MAÑANA (< 12:00)"
+            turn_quota = QUOTA_MORNING
+        elif today_hour < 18:
+            time_slot = "TARDE (12:00 - 17:59)"
+            turn_quota = QUOTA_AFTERNOON
+        else:
+            time_slot = "NOCHE (>= 18:00)"
+            turn_quota = QUOTA_NIGHT
 
-        size_mb = path_zip_local.stat().st_size / (1024 * 1024)
+        remanente_diario = max(0, MAX_DAILY_QUOTA - download_today)
+        effective_quota = min(turn_quota, remanente_diario)
+
         logger.info(
-            f"[{self.area}] ZIP generado exitosamente: {name_zip} ({size_mb:.2f} MB con {len(files_xml)} comprobantes)."
+            f"[{self.area}] Franja {time_slot} | Cuota turno: {turn_quota} | "
+            f"Descargados hoy: {download_today}/{MAX_DAILY_QUOTA} | "
+            f"Cuota asignada a esta ejecución: {effective_quota}"
+        )
+        return effective_quota
+
+    def Update_Daily_Quota(self, new_downloads: int) -> None:
+        if new_downloads <= 0:
+            return
+
+        download_today = 0
+        if self.path_quota_file.exists():
+            try:
+                data = json.loads(
+                    self.path_quota_file.read_text(encoding="utf-8")
+                )
+                download_today = int(data.get("descargados_hoy", 0))
+            except Exception:
+                download_today = 0
+
+        updated_total = download_today + new_downloads
+        payload = {
+            "fecha": self.period_time,
+            "area": self.area,
+            "descargados_hoy": updated_total,
+            "ultima_actualizacion": get_current_datetime().isoformat(),
+        }
+        self.path_quota_file.write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
+        logger.info(
+            f"[{self.area}] Cuota diaria actualizada: {updated_total}/{MAX_DAILY_QUOTA} XMLs descargados hoy."
         )
 
-        return path_zip_local
+    def Zip_Downloaded_XMLs(self, timestamp: str) -> list[tuple[Path, list[str]]]:
+        files_xml = sorted(self.path_folder_xmls.glob("*.xml"))
+        if not files_xml:
+            raise Exception(
+                f"[{self.area}] No se encontraron archivos XML para empaquetar en el ZIP de correo."
+            )
+
+        max_bytes = int(MAX_ZIP_SIZE_MB * 1024 * 1024)
+        grupos_xml: list[list[Path]] = []
+        grupo_actual: list[Path] = []
+
+        buffer = io.BytesIO()
+        zf_sim = zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED)
+
+        for xml_file in files_xml:
+            zf_sim.write(xml_file, arcname=xml_file.name)
+            if buffer.tell() > max_bytes and grupo_actual:
+                zf_sim.close()
+                grupos_xml.append(grupo_actual)
+
+                grupo_actual = [xml_file]
+                buffer = io.BytesIO()
+                zf_sim = zipfile.ZipFile(
+                    buffer, "w", compression=zipfile.ZIP_DEFLATED
+                )
+                zf_sim.write(xml_file, arcname=xml_file.name)
+            else:
+                grupo_actual.append(xml_file)
+
+        zf_sim.close()
+        if grupo_actual:
+            grupos_xml.append(grupo_actual)
+
+        total_partes = len(grupos_xml)
+        zips_generados: list[tuple[Path, list[str]]] = []
+
+        for idx_parte, lista_archivos in enumerate(grupos_xml, start=1):
+            if total_partes == 1:
+                name_zip = f"XMLs_SUNAT_{self.area}_{timestamp}.zip"
+            else:
+                name_zip = f"XMLs_SUNAT_{self.area}_{timestamp}_PARTE_{idx_parte}_DE_{total_partes}.zip"
+
+            path_zip_local = self.path_folder_xmls_zip / name_zip
+            nombres_incluidos: list[str] = []
+
+            with zipfile.ZipFile(path_zip_local, "w", compression=zipfile.ZIP_DEFLATED) as zip_out:
+                for xml_file in lista_archivos:
+                    zip_out.write(xml_file, arcname=xml_file.name)
+                    nombres_incluidos.append(xml_file.name)
+
+            size_mb = path_zip_local.stat().st_size / (1024 * 1024)
+            logger.info(
+                f"[{self.area}] ZIP generado ({idx_parte}/{total_partes}): {name_zip} "
+                f"({size_mb:.2f} MB con {len(nombres_incluidos)} comprobantes)."
+            )
+            zips_generados.append((path_zip_local, nombres_incluidos))
+
+        return zips_generados
 
     def Execute_Robot(self):
         global MAX_RETRIES_PER_RECORD
@@ -690,7 +885,7 @@ class Robot_Sunat:
                 )
                 export_df_to_excel(ruta_obs, df_observados[COLUMNS_FINAL])
 
-                copy_items_to_folder(self.path_folder_quarantine,self.path_folder_quarantine_cloud,True,False)
+                copy_items_to_folder(self.path_folder_quarantine,self.path_folder_quarantine_cloud,True,False,self.area)
                 
                 logger.warning(
                     f"[{self.area}] Se guardó Excel con registros observados en OneDrive: {self.path_folder_quarantine_cloud.name}/{ruta_obs.name} ({len(df_observados)} filas)"
@@ -702,10 +897,11 @@ class Robot_Sunat:
                 )
 
             total_rows = len(df_validos)
+            execution_quota = self.Get_Dynamic_Quota()
 
-            df_lote_actual = df_validos.iloc[:MAX_RECORDS_PER_RUN].copy()
+            df_lote_actual = df_validos.iloc[:execution_quota].copy()
 
-            df_remanentes_cola = df_validos.iloc[MAX_RECORDS_PER_RUN:].copy()
+            df_remanentes_cola = df_validos.iloc[execution_quota:].copy()
             df_remanentes_cola["DETALLE_ESTADO"] = "NO PROCESADO - REMANENTE"
             df_remanentes_cola["FECHA_PROCESO"] = None
 
@@ -715,6 +911,8 @@ class Robot_Sunat:
             )
 
             map_xmls_locals = self.Index_XMLs_Locals()
+            xml_por_idx: dict[int, str] = {}
+            new_sunat_downloads = 0
 
             contador_batch_bk = 0
             for idx, fila in df_lote_actual.iterrows():
@@ -726,7 +924,7 @@ class Robot_Sunat:
 
                 identificador_cpe = f"{serie}-{numero} (RUC: {ruc})"
 
-                file_exists = map_xmls_locals.get((serie, num_limpio))
+                file_exists = map_xmls_locals.get((ruc, serie, num_limpio)) or map_xmls_locals.get(("", serie, num_limpio))
                 if file_exists:
                     logger.info(
                         f"[{contador_batch_bk}/{total_rows}] OMITIENDO: {identificador_cpe} ya existe en disco ({file_exists})."
@@ -736,6 +934,7 @@ class Robot_Sunat:
                         f"RECUPERADO_LOCAL_PREVIO: {file_exists}"
                     )
                     df_lote_actual.at[idx, "FECHA_PROCESO"] = pd.Timestamp.now()
+                    xml_por_idx[idx] = file_exists
 
             df_pendientes_sunat = df_lote_actual[
                 df_lote_actual["ESTADO"] == "PENDIENTE"
@@ -768,7 +967,7 @@ class Robot_Sunat:
                         for idx, fila in df_grupo.iterrows():
                             contador_batch += 1
                             filtro = (
-                                str(fila.get("filtro", "Recibido")).strip().capitalize()
+                                str(fila.get("FILTRO", "Recibido")).strip().capitalize()
                                 or "Recibido"
                             )
                             ruc = str(fila["RUC"]).strip()
@@ -912,6 +1111,8 @@ class Robot_Sunat:
 
                                     if archivos_ok:
                                         descarga_exitosa = True
+                                        new_sunat_downloads += 1
+                                        xml_por_idx[idx] = archivos_ok[0]
                                         detalle_resultado = (f"DESCARGA_EXITOSA: {archivos_ok[0]}")
                                         logger.info(f"[{self.area}|{current_company}] Descarga y extracción XML exitosa: {archivos_ok[0]}")
                                     else:
@@ -966,6 +1167,8 @@ class Robot_Sunat:
 
                         self.Close_Sunat_Session(context, page, current_company)
 
+            self.Update_Daily_Quota(new_sunat_downloads)
+
             df_descargados = df_lote_actual[df_lote_actual["ESTADO"] == "DESCARGADO"].copy()
 
             observados_sunat = df_lote_actual["DETALLE_ESTADO"].str.contains(
@@ -992,7 +1195,7 @@ class Robot_Sunat:
                     / f"Comprobantes_No_Descargados_SUNAT_{self.area}_{timestamp_actual}.xlsx"
                 )
                 export_df_to_excel(ruta_obs_sunat, df_observados_sunat[COLUMNS_FINAL])
-                copy_items_to_folder(self.path_folder_quarantine,self.path_folder_quarantine_cloud,True,False)
+                copy_items_to_folder(self.path_folder_quarantine,self.path_folder_quarantine_cloud,True,False,self.area)
                 logger.warning(
                     f"[{self.area}] Se guardó Excel con registros observados por SUNAT en OneDrive: {self.path_folder_quarantine_cloud.parent}/{self.path_folder_quarantine_cloud.name} ({len(df_observados_sunat)} filas)"
                 )
@@ -1018,56 +1221,98 @@ class Robot_Sunat:
             else:
                 logger.info(f"[{self.area}] Se descargó los XMLs de todos los comprobantes. Carpeta Inputs limpia...")
 
+            email_failed = False
+
             if not df_descargados.empty:
                 self.path_folder_xmls.mkdir(parents=True, exist_ok=True)
-                ruta_proc = self.path_folder_processed / f"Comprobantes_Descargados_{self.area}_{timestamp_actual}.xlsx"
-                export_df_to_excel(ruta_proc, df_descargados[COLUMNS_FINAL])
-
-                copy_items_to_folder(self.path_folder_processed,self.path_folder_processed_cloud,True,False)
-
-                logger.info(
-                    f"[{self.area}] Se guardó Excel con registros procesados a OneDrive: {self.path_folder_processed_cloud.parent}/{self.path_folder_processed_cloud.name} ({len(df_descargados)} filas)"
-                )
                 
-                copy_items_to_folder(self.path_folder_xmls,self.path_folder_xmls_cloud,False,True)
+                copy_items_to_folder(self.path_folder_xmls,self.path_folder_xmls_cloud,False,True,self.area)
 
                 logger.info(
                     f"[{self.area}] Se guardó Lote de XMLs descargados a OneDrive: {self.path_folder_xmls_cloud.parent}/{self.path_folder_xmls_cloud.name} ({len(df_descargados)} archivos)"
                 )
 
                 self.path_folder_xmls_zip.mkdir(parents=True, exist_ok=True)
-                self.zip_generado = self.Zip_Downloaded_XMLs(timestamp_actual)
+                zips_generados = self.Zip_Downloaded_XMLs(timestamp_actual)
+                total_parts = len(zips_generados)
 
-                if self.zip_generado and self.zip_generado.exists():
-                    send_email_graph(
+                for idx_parte, (ruta_zip, nombres_xml_parte) in enumerate(zips_generados, start=1):
+                    set_xmls_parte = set(nombres_xml_parte)
+                    idxs_en_parte = [
+                        i for i, xml_name in xml_por_idx.items()
+                        if xml_name in set_xmls_parte and i in df_descargados.index
+                    ]
+
+                    part_companies = sorted(
+                        df_descargados.loc[idxs_en_parte, "EMPRESA"]
+                        .unique()
+                        .tolist()
+                    )
+                
+                    if total_parts == 1:
+                        email_subject = f"ROBOT SUNAT XML | [{self.area}] | Lote {self.period_time} ({len(nombres_xml_parte)} XMLs)"
+                    else:
+                        email_subject = (
+                            f"ROBOT SUNAT XML | {self.area} | Lote {self.period_time} — "
+                            f"Parte {idx_parte} de {total_parts}"
+                        )
+
+                    body_html = build_sunat_email_html(
+                        self.area,
+                        self.period_time,
+                        len(nombres_xml_parte),
+                        len(df_descargados),
+                        ruta_zip.name,
+                        part_companies,
+                        idx_parte,
+                        total_parts,
+                    )
+
+                    email_sent = send_email_graph(
                         TENANT_ID,
                         CLIENT_ID,
                         CLIENT_SECRET,
                         MAIL_BOX,
                         RECIPIENTS_MAIL_LIST,
-                        "Prueba Correo",
-                        "Dev",
-                        self.zip_generado,
-                        self.area
+                        email_subject,
+                        body_html,
+                        ruta_zip,
+                        self.area,
                     )
-                    copy_items_to_folder(self.path_folder_xmls_zip,self.path_folder_xmls_zip_cloud,True,False)
-                    logger.info(
-                        f"[{self.area}] Se guardó Consolidado ZIP BK en OneDrive: {self.path_folder_xmls_zip_cloud}/{self.zip_generado.name}"
-                    )
+
+                    if email_sent:
+                        df_descargados.loc[idxs_en_parte, "ESTADO"] = "ENVIADO_CORREO"
+                        df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] = df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] + f" | ENVIADO_ZIP: {ruta_zip.name}"
+                    else:
+                        email_failed = True
+                        df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] = df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] + f" | ERROR_ENVIO_ZIP: {ruta_zip.name}"
+                        logger.error(
+                            f"[{self.area}] No se pudo enviar el correo para el paquete {ruta_zip.name}."
+                        )
+
+                copy_items_to_folder(self.path_folder_xmls_zip, self.path_folder_xmls_zip_cloud,True,False,self.area)
+                logger.info(
+                    f"[{self.area}] Se guardaron {total_parts} paquete(s) ZIP BK en OneDrive: {self.path_folder_xmls_zip_cloud}"
+                )
+
+                path_process = self.path_folder_processed / f"Comprobantes_Descargados_{self.area}_{timestamp_actual}.xlsx"
+                export_df_to_excel(path_process, df_descargados[COLUMNS_FINAL])
+
+                copy_items_to_folder(self.path_folder_processed,self.path_folder_processed_cloud,True,False,self.area)
+                logger.info(
+                    f"[{self.area}] Se guardó Excel con registros procesados en OneDrive: {self.path_folder_processed_cloud.parent}/{self.path_folder_processed_cloud.name} ({len(df_descargados)} filas)"
+                )
 
                 if self.path_folder_xmls.exists():
-                    try:
-                        shutil.rmtree(
-                            self.path_folder_xmls,
-                            ignore_errors=False,
-                            onexc=handle_remove_readonly,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"[{self.area}] No se pudo eliminar la carpeta temporal {self.path_folder_xmls}: {e}"
-                        )
+                    remove_temporal_folder(self.path_folder_xmls,self.area)
 
-            self.Finish_Process(True)
+            if email_failed:
+                self.Finish_Process(
+                    False,
+                    "XMLs descargados y respaldados en OneDrive, pero falló el envío de correo.",
+                )
+            else:
+                self.Finish_Process(True)
         except Exception as e:
             self.Finish_Process(False, str(e))
         finally:

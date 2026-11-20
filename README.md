@@ -2,14 +2,16 @@
 
 > **Descripción:** Consulta automatizada de comprobantes electrónicos en el portal SOL de SUNAT y descarga masiva de archivos XML.
 
-Herramienta diseñada para el procesamiento en lote de comprobantes (Facturas y Notas de Crédito), con tolerancia a fallos, recuperación automática de sesión, descompresión de paquetes ZIP, envíos de correos y auditoría de ejecución.
+Herramienta diseñada para el procesamiento en lote de comprobantes (Facturas y Notas de Crédito), con ejecución paralela por área (`Siniestros` y `Salud`), tolerancia a fallos, recuperación automática de sesión, descompresión de paquetes ZIP, envío de correos vía Microsoft Graph API y auditoría de ejecución.
 
 ---
 
 ## 🚀 Tecnologías y Requisitos
 
-![Python](https://img.shields.io/badge/Python-3.14%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white)
 ![uv](https://img.shields.io/badge/Gestor_de_Paquetes-uv-D042ED.svg?style=for-the-badge)
+
+> **Compatibilidad:** Requiere **Python `>=3.11`** (desarrollado y validado en **Python `3.14`** sobre **Windows**).
 
 ### 📚 Stack Principal
 
@@ -25,8 +27,9 @@ Herramienta diseñada para el procesamiento en lote de comprobantes (Facturas y 
 
 **Envío de Correo:**  
 ![MSAL](https://img.shields.io/badge/msal-%3E%3D1.39.0-CA3519.svg?style=flat-square&logo=msal)
+![Requests](https://img.shields.io/badge/requests-%3E%3D2.34.2-2CA5E0.svg?style=flat-square)
 
-**Envío de Variables de Entorno y Credenciales:**  
+**Configuración y Credenciales:**  
 ![Keyring](https://img.shields.io/badge/keyring-%3E%3D25.7.0-015F78.svg?style=flat-square&logo=keyring)
 ![Pydantic-Settings](https://img.shields.io/badge/pydantic--settings-%3E%3D2.16.1-4D179A.svg?style=flat-square&logo=pydantic--settings)
 
@@ -39,7 +42,7 @@ Herramienta diseñada para el procesamiento en lote de comprobantes (Facturas y 
 ## 🛠️ Guía de Instalación y Uso
 
 ### 1️⃣ Instalar `pipx` y `uv`
-Para gestionar las dependencias de manera rápida y global, instalaremos `uv` utilizando `pipx`. Ejecuta lo siguiente en tu terminal:
+Para gestionar las dependencias de manera rápida y global, instala `uv` utilizando `pipx`:
 
 ```bash
 # 1. Instalar pipx
@@ -53,7 +56,7 @@ pipx install uv --pip-args="--trusted-host pypi.org --trusted-host pypi.python.o
 ```
 
 ### 2️⃣ Configurar el Entorno del Proyecto
-> ⚠️ **Nota Importante:** Este paso **solo se ejecuta una vez** (cuando clonas el repositorio o instalas el proyecto desde cero). No es necesario repetirlo en cada ejecución.
+> ⚠️ **Nota Importante:** Este paso **solo se ejecuta una vez** (cuando clonas el repositorio o instalas el proyecto desde cero).
 
 Una vez con `uv` instalado, prepárate para ejecutar el proyecto creando su entorno aislado:
 
@@ -65,14 +68,14 @@ uv venv
 uv init
 
 # 3. Sincronizar dependencias (instala todo lo de pyproject.toml)
-uv sync --upgrade
+uv sync
 
-# (Opcional) Verificar que todas las librerías se hayan instalado correctamente listándolas con:
+# (Opcional) Verificar librerías instaladas
 uv pip list
 ```
 
-### 3️⃣ Configurar Variables de Entorno (.env) y Credenciales de Windows
-Crear un archivo .env en la raíz del proyecto con la siguiente estructura:
+### 3️⃣ Configurar Variables de Entorno (`.env`) y Credenciales de Windows
+Copiar [`.env.example`](.env.example) como `.env` en la raíz del proyecto y completar los valores reales:
 
 ```bash
 # Colocar los *valores reales* de cada variable para un corecto funcionamiento
@@ -80,41 +83,58 @@ SUNAT_RUC_LPG=20XXXXXXXXX
 SUNAT_RUC_LPE=20XXXXXXXXX
 PATH_CLOUD_TEST=C:\Users\user_qa\...
 PATH_CLOUD=C:\Users\user_prod\...
+PATH_CLOUD_TEST=C:\Users\usuario\OneDrive - Empresa\Carpeta_Pruebas
+PATH_CLOUD=C:\Users\usuario\OneDrive - Empresa\Carpeta_Produccion
+MAIL_BOX=desarrollo@empresa.com.pe
+RECIPIENTS_MAIL_LIST=usuario@empresa.com.pe|operario@empresa.com.pe
 ```
 
-> ⚠️ **Nota Importante:** Ejecutar el archivo **supply_manager.bat** para registrar las credenciales de SUNAT de manera segura en Windows.
+> ⚠️ **Aprovisionamiento de secretos (`supply_manager.bat`):** Ejecutar **`supply_manager.bat`** para registrar en **Windows Credential Manager** (`RPA_SUNAT_DEV`, `RPA_SUNAT_TEST` o `RPA_SUNAT_PROD`) los **7 secretos** obligatorios: `USER_LPG`, `PASS_LPG`, `USER_LPE`, `PASS_LPE`, `TENANT_ID`, `CLIENT_ID` y `CLIENT_SECRET`.
 
 ### 4️⃣ Ejecución del Robot
 
-Colocar el archivo Excel con los comprobantes a consultar en la carpeta:
+Colocar el archivo Excel con los comprobantes a consultar en la carpeta de entrada de cada área en OneDrive:
 
 ```bash
 # Ruta de Carpeta Sincronizada
 f"{PATH_CLOUD}/Inputs/"
 
+# Ruta de entrada en OneDrive por área (Siniestros | Salud)
+{PATH_CLOUD}\{Area}\XMLs_SUNAT\Inputs\
+
 # Columnas requeridas
 (EMPRESA, RUC, COD_DCMNTO, SERIEDOC, NUMERODOC)
 ```
 
-> ⚠️ **Nota Importante:** La columna COD_DCMNTO es de **tipo numérico (entero)** por lo que se espera que tenga los códigos del tipo de comprobante (Ejm. 01 o 07).
+> ⚠️ **Nota Importante:** La columna `COD_DCMNTO` acepta valores numéricos o texto de 2 dígitos (`01`, `03`, `07`, `08`, `R1`).
 
 Para iniciar el robot, ejecutar siguiente comando:
+#### Modos de Ejecución
+* **Lanzador Producción (`APP_ENV=PROD`, ambas áreas en paralelo):** ejecutar `run_robot.bat`.
+* **Lanzador Pruebas (`APP_ENV=TEST`, ambas áreas en paralelo):** ejecutar `run_test.bat`.
+* **Aprovisionador de Credenciales:** ejecutar `supply_manager.bat`.
+* **Ejecución Manual por CLI (`APP_ENV=DEV` por defecto):**
+  ```powershell
+  # Ejecutar todas las áreas en paralelo
+  uv run Main.py
 
-```bash
-uv run Main.py
+  # Ejecutar un área específica
+  uv run Main.py Salud
+  uv run Main.py Siniestros
+  ```
+
+### 📂 Estructura Operativa Multi-Área
+
 ```
-
-Estructura y Resultados generados:
-
+- Areas_Local/{Area}/Inputs/: Cola local activa (mantiene pendientes/remanentes para reintento).
+- Areas_Local/{Area}/Outputs/Xmls/: Carpeta temporal de XMLs del ciclo (limpiada tras respaldo en OneDrive).
+- Areas_Local/{Area}/Outputs/Procesados/: Staging local de reportes de descargados antes de copiar a OneDrive.
+- Areas_Local/{Area}/Outputs/Observados/: Staging local de reportes observados antes de copiar a OneDrive.
+- Areas_Local/{Area}/Perfil_Edge/: Perfil persistente de Microsoft Edge aislado por área.
+- {PATH_CLOUD}/{Area}/XMLs_SUNAT/Historicos/: Respaldo de Excel ingeridos desde OneDrive.
+- {PATH_CLOUD}/{Area}/XMLs_SUNAT/Xmls/: Lotes de XMLs descomprimidos (excluyendo constancias CDR R-).
+- {PATH_CLOUD}/{Area}/XMLs_SUNAT/Comprimidos_Correo/: Consolidados ZIP enviados por correo.
+- {PATH_CLOUD}/{Area}/XMLs_SUNAT/Procesados/: Reporte Excel formateado como tabla con descargados exitosos.
+- {PATH_CLOUD}/{Area}/XMLs_SUNAT/Observados/: Reportes Excel con registros inválidos o no encontrados en SUNAT.
+- Logs/Log_Robot_Sunat_{Area}_{YYYYMMDD}.log: Bitácoras diarias de auditoría por área.
 ```
-- Inputs/: Mantiene únicamente los registros nuevos o pendientes de reintento si el portal experimenta intermitencias durante la ejecución.
-
-- Outputs/Xmls/: Archivos .xml descomprimidos (excluyendo las constancias CDR R-).
-
-- Outputs/Procesados/: Reporte Excel formateado como tabla con los comprobantes descargados exitosamente.
-
-- Outputs/Observados/: Reporte Excel con los comprobantes rechazados por carecer de RUC válido, campos obligatorios o que no se encontró información en el portal SUNAT.
-
-- Logs/: Archivos de auditoría en tiempo real.
-```
-

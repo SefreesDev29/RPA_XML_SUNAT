@@ -58,7 +58,8 @@ try:
     client_id = masked_input("Ingrese la Client ID: ").strip()
     client_secret = masked_input("Ingrese la Client Secret (Value): ").strip()
 
-    if not usuario_lpg or not password_lpg or not usuario_lpe or not password_lpe:
+    if (not usuario_lpg or not password_lpg or not usuario_lpe or not password_lpe 
+        or not tenant_id or not client_id or not client_secret):
         console.print(
             "\n[bold red][ERROR] Operación cancelada: ningún campo puede estar vacío.[/bold red]"
         )

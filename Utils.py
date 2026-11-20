@@ -2,6 +2,7 @@ import os
 import stat
 import subprocess
 import time
+import ctypes
 from datetime import datetime, date, timedelta
 import sys
 import shutil
@@ -15,6 +16,8 @@ import pandas as pd
 import msal
 import requests
 import base64
+
+IS_DEV = os.getenv("APP_ENV", "PROD") == "DEV"
 
 LIMA_TZ = ZoneInfo("America/Lima")
 
@@ -84,19 +87,19 @@ def remove_log():
 
 def add_log_console():
     logger.add(sys.stdout,
-            backtrace=False, diagnose=False, level="DEBUG",
+            backtrace=False, diagnose=IS_DEV, level="DEBUG",
             colorize=True,
             format=custom_format(0))
 
 def add_log_file(path_log: Path, file_log_exist: bool, exits_log: bool):
     if path_log.exists() and not exits_log:
         logger.add(path_log, 
-                backtrace=True, diagnose=True, level="INFO",
+                backtrace=True, diagnose=IS_DEV, level="INFO",
                 format="\n\n{time:DD/MM/YYYY HH:mm:ss} | {level:<7} | {name}:{function}:{line} - {message}") 
         return file_log_exist
     
     logger.add(path_log, 
-        backtrace=True, diagnose=True, level="INFO",
+        backtrace=True, diagnose=IS_DEV, level="INFO",
         format="{time:DD/MM/YYYY HH:mm:ss} | {level:<7} | {name}:{function}:{line} - {message}") 
     return True
 
@@ -150,7 +153,19 @@ def handle_remove_readonly(func, path: str, exc: BaseException) -> None:
                 raise
             time.sleep(0.2)
 
-def copy_items_to_folder(path_folder_src: Path, path_folder_dtn: Path, clear_folder_src : bool = False, create_diff_folder_dtn : bool = False):    
+def remove_temporal_folder(path_folder: Path, area: str = "Siniestros"):
+    try:
+        shutil.rmtree(
+            path_folder,
+            ignore_errors=False,
+            onexc=handle_remove_readonly,
+        )
+    except Exception as e:
+        logger.warning(
+            f"[{area}] No se pudo eliminar la carpeta temporal {path_folder}: {e}"
+        )
+
+def copy_items_to_folder(path_folder_src: Path, path_folder_dtn: Path, clear_folder_src : bool = False, create_diff_folder_dtn : bool = False, area: str = "Siniestros"):    
     path_folder_dtn_new: Path = path_folder_dtn
     
     if not path_folder_dtn.exists():
@@ -162,9 +177,10 @@ def copy_items_to_folder(path_folder_src: Path, path_folder_dtn: Path, clear_fol
             path_folder_dtn_new = path_folder_dtn.parent /  f"{path_folder_dtn.name}_2"
             if path_folder_dtn_new.exists():
                 path_folder_list = [
-                    int((subfolder.name).split("_")[2]) for subfolder in path_folder_dtn.parent.iterdir() 
+                    int(str((subfolder.name).split("_")[2]).strip()) for subfolder in path_folder_dtn.parent.iterdir() 
                     if subfolder.is_dir() and path_folder_dtn.name in subfolder.name 
                     and len((subfolder.name).split("_")) > 2
+                    and str((subfolder.name).split("_")[2]).strip().isdigit()
                 ]
                 path_folder_list.sort(reverse=True)
                 suffix = path_folder_list[0] + 1
@@ -178,10 +194,120 @@ def copy_items_to_folder(path_folder_src: Path, path_folder_dtn: Path, clear_fol
             shutil.copy2(item, dst_item)
 
     if clear_folder_src:
-        try:
-            shutil.rmtree(path_folder_src, ignore_errors=False, onexc=handle_remove_readonly)
-        except Exception as e:
-            logger.warning(f"No se pudo eliminar la carpeta temporal {path_folder_src}: {e}")
+        remove_temporal_folder(path_folder_src, area)
+
+def build_sunat_email_html(
+    area: str,
+    process_date: str,
+    xmls_in_package: int,
+    total_lote: int,
+    zip_name: str,
+    included_companies: list[str],
+    current_part: int = 1,
+    total_parts: int = 1,
+) -> str:
+    empresas_str = " / ".join(included_companies) if included_companies else "-"
+    badge_entrega = (
+        f"PAQUETE {current_part} DE {total_parts}"
+        if total_parts > 1
+        else "ENTREGA ÚNICA"
+    )
+
+    fila_consolidado = ""
+    if total_parts > 1:
+        fila_consolidado = f"""
+        <tr>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: 600; width: 42%;">Total consolidado del lote</td>
+            <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #111827;">{total_lote} comprobantes</td>
+        </tr>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="es">
+    <head><meta charset="UTF-8"></head>
+    <body style="margin: 0; padding: 0; background-color: #F3F4F6; font-family: 'Segoe UI', Arial, sans-serif;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #F3F4F6; padding: 24px 12px;">
+            <tr>
+                <td align="center">
+                    <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="background-color: #FFFFFF; border-radius: 8px; overflow: hidden; border: 1px solid #E5E7EB;">
+                        <tr>
+                            <td style="background-color: #ff6d46; padding: 20px 24px;">
+                                <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                                    <tr>
+                                        <td>
+                                            <span style="display: inline-block; background-color: #029790; color: #E0F2FE; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; padding: 4px 10px; border-radius: 4px; text-transform: uppercase;">
+                                                ROBOT_SUNAT_PYTHON
+                                            </span>
+                                            <h1 style="margin: 10px 0 2px 0; color: #FFFFFF; font-size: 19px; font-weight: 600;">
+                                                Descarga Automatizada de XMLs SUNAT
+                                            </h1>
+                                            <p style="margin: 0; color: #FFFFFF; font-size: 13px; font-weight: bold;">
+                                                ÁREA: <strong style="color: #FFFFFF;">{area}</strong>
+                                            </p>
+                                        </td>
+                                        <td align="right" valign="top">
+                                            <span style="display: inline-block; background-color: #7878be; color: #FFFFFF; font-size: 11px; font-weight: 700; padding: 5px 10px; border-radius: 4px;">
+                                                {badge_entrega}
+                                            </span>
+                                        </td>
+                                    </tr>
+                                </table>
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td style="padding: 20px 24px 12px 24px; color: #374151; font-size: 14px; line-height: 1.5;">
+                                Estimados,<br>
+                                Se adjunta el archivo comprimido con los comprobantes electrónicos (XML) descargados desde el portal SUNAT SOL correspondientes al proceso de <strong>{area}</strong>.
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td style="padding: 8px 24px 20px 24px;">
+                                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border: 1px solid #E5E7EB; border-radius: 6px; border-collapse: collapse; font-size: 13px;">
+                                    <tr style="background-color: #F8FAFC;">
+                                        <th colspan="2" align="left" style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #7878be; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">
+                                            Resumen del Paquete Adjunto
+                                        </th>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: 600; width: 42%;">Área</td>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #111827;">{area}</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: 600;">Empresa(s)</td>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #111827;">{empresas_str}</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: 600;">Fecha de Proceso</td>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #111827;">{process_date}</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: 600;">XMLs en este archivo</td>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #059669; font-weight: 700;">{xmls_in_package} comprobantes</td>
+                                    </tr>
+                                    {fila_consolidado}
+                                    <tr>
+                                        <td style="padding: 10px 14px; color: #4B5563; font-weight: 600;">Archivo Adjunto</td>
+                                        <td style="padding: 10px 14px; color: #1F2937; font-family: Consolas, monospace; font-size: 12px;">{zip_name}</td>
+                                    </tr>
+                                </table>
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td style="background-color: #F8FAFC; padding: 14px 24px; border-top: 1px solid #E5E7EB; color: #6B7280; font-size: 11px; text-align: center;">
+                                Mensaje generado automáticamente por <strong>ROBOT_SUNAT_PYTHON</strong> • Planeamiento de Operaciones
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    """
 
 def send_email_graph(
     tenant_id: str,
@@ -193,10 +319,11 @@ def send_email_graph(
     body_text: str,
     path_file_zip: Path | None = None,
     area: str | None = None,
+    is_html: bool = True,
 ) -> bool:
     authority = f"https://login.microsoftonline.com/{tenant_id}"
     app = msal.ConfidentialClientApplication(
-        client_id, authority=authority, client_credential=client_secret
+        client_id, authority=authority, client_credential=client_secret, timeout=15
     )
 
     scopes = ["https://graph.microsoft.com/.default"]
@@ -215,7 +342,10 @@ def send_email_graph(
 
     mensaje = {
         "subject": subject,
-        "body": {"contentType": "Text", "content": body_text},
+        "body": {
+            "contentType": "HTML" if is_html else "Text", 
+            "content": body_text
+        },
         "toRecipients": to_recipients,
     }
 
@@ -239,7 +369,7 @@ def send_email_graph(
     }
     payload = {"message": mensaje, "saveToSentItems": "true"}
 
-    response = requests.post(url_envio, headers=headers, json=payload)
+    response = requests.post(url_envio, headers=headers, json=payload, timeout=(10, 30))
 
     if response.status_code == 202:
         logger.info(f"[{area}] Correo enviado exitosamente a {recipients}.")
@@ -295,3 +425,27 @@ def control_storage_day(list_path_folder_onedrive: list[Path], path_file_control
         cleanup_storage_onedrive(path_folder)
 
     path_file_control.write_text(today, encoding="utf-8")
+
+def is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    ERROR_ACCESS_DENIED = 5
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+    )
+
+    if not handle:
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+
+    try:
+        exit_code = ctypes.c_ulong()
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return exit_code.value == STILL_ACTIVE
+        return True
+    finally:
+        kernel32.CloseHandle(handle)

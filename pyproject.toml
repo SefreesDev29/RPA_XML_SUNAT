@@ -3,7 +3,7 @@ name = "robot-xml-sunat"
 version = "0.1.0"
 description = "Descarga Automatizada de XMLs del Portal de la SUNAT."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
     "keyring>=25.7.0",
     "loguru>=0.7.3",
