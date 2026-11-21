@@ -242,9 +242,6 @@ def build_sunat_email_html(
                                             <h1 style="margin: 10px 0 2px 0; color: #FFFFFF; font-size: 19px; font-weight: 600;">
                                                 Descarga Automatizada de XMLs SUNAT
                                             </h1>
-                                            <p style="margin: 0; color: #FFFFFF; font-size: 13px; font-weight: bold;">
-                                                ÁREA: <strong style="color: #FFFFFF;">{area}</strong>
-                                            </p>
                                         </td>
                                         <td align="right" valign="top">
                                             <span style="display: inline-block; background-color: #7878be; color: #FFFFFF; font-size: 11px; font-weight: 700; padding: 5px 10px; border-radius: 4px;">
@@ -264,7 +261,7 @@ def build_sunat_email_html(
                         </tr>
 
                         <tr>
-                            <td style="padding: 8px 24px 20px 24px;">
+                            <td style="padding: 8px 24px 0px 24px;">
                                 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border: 1px solid #E5E7EB; border-radius: 6px; border-collapse: collapse; font-size: 13px;">
                                     <tr style="background-color: #F8FAFC;">
                                         <th colspan="2" align="left" style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #7878be; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">
@@ -272,24 +269,24 @@ def build_sunat_email_html(
                                         </th>
                                     </tr>
                                     <tr>
-                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: 600; width: 42%;">Área</td>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: bold; width: 42%;">🗄️ Área</td>
                                         <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #111827;">{area}</td>
                                     </tr>
                                     <tr>
-                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: 600;">Empresa(s)</td>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: bold;">🏢 Empresa(s)</td>
                                         <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #111827;">{empresas_str}</td>
                                     </tr>
                                     <tr>
-                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: 600;">Fecha de Proceso</td>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: bold;">🗓️ Fecha de Proceso</td>
                                         <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #111827;">{process_date}</td>
                                     </tr>
                                     <tr>
-                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: 600;">XMLs en este archivo</td>
-                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #059669; font-weight: 700;">{xmls_in_package} comprobantes</td>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #4B5563; font-weight: bold;">📋 XMLs en este archivo</td>
+                                        <td style="padding: 10px 14px; border-bottom: 1px solid #E5E7EB; color: #059669; font-weight: bold;">{xmls_in_package} comprobantes</td>
                                     </tr>
                                     {fila_consolidado}
                                     <tr>
-                                        <td style="padding: 10px 14px; color: #4B5563; font-weight: 600;">Archivo Adjunto</td>
+                                        <td style="padding: 10px 14px; color: #4B5563; font-weight: bold;">📂 Archivo Adjunto</td>
                                         <td style="padding: 10px 14px; color: #1F2937; font-family: Consolas, monospace; font-size: 12px;">{zip_name}</td>
                                     </tr>
                                 </table>
@@ -297,8 +294,76 @@ def build_sunat_email_html(
                         </tr>
 
                         <tr>
-                            <td style="background-color: #F8FAFC; padding: 14px 24px; border-top: 1px solid #E5E7EB; color: #6B7280; font-size: 11px; text-align: center;">
-                                Mensaje generado automáticamente por <strong>ROBOT_SUNAT_PYTHON</strong> • Planeamiento de Operaciones
+                            <td style="background-color: #fcfaf8; padding: 14px 5px; text-align: center;">
+                                <span style="font-size: 12px; color: #9ca3af;">
+                                Este es un mensaje generado automáticamente <strong>ROBOT_SUNAT_PYTHON</strong>. <br>Por favor, no responder a este correo. Equipo Automatización & IA.
+                                </span>
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td>
+                                <table style="width:100%; margin:0; background-color:#ff6d46; padding:10px 25px">
+                                    <tbody>
+                                        <tr>  <!-- valign="bottom" -->
+                                            <td style="width:50%; padding:0">
+                                                <table>
+                                                    <tbody>
+                                                        <tr>
+                                                            <td><a href="https://www.facebook.com/LaPositivaSeguros/"
+                                                                    target="_blank" rel="noopener noreferrer"
+                                                                    data-auth="NotApplicable" style="text-decoration:none"
+                                                                    data-linkindex="0"
+                                                                    title="https://www.facebook.com/LaPositivaSeguros/"><img
+                                                                        data-imagetype="External"
+                                                                        src="http://cdn.email-platform.com/positivaseguros/COBRANZAS/Estaticas/facebook.png"
+                                                                        data-imageproxyendpoint="/actions/ei" alt="facebook"
+                                                                        style="max-width:10px; padding-right:5px"> </a><a
+                                                                    href="https://twitter.com/lapositiva_peru?lang=es"
+                                                                    target="_blank" rel="noopener noreferrer"
+                                                                    data-auth="NotApplicable" style="text-decoration:none"
+                                                                    data-linkindex="1"
+                                                                    title="https://twitter.com/lapositiva_peru?lang=es"><img
+                                                                        data-imagetype="External"
+                                                                        src="https://images.email-platform.com/positivaseguros/COBRANZAS/Estaticas/twitter_small.png"
+                                                                        alt="twitter" style="max-width:10px; padding-right:5px">
+                                                                </a><a href="https://www.youtube.com/user/LaPositivaPeru"
+                                                                    target="_blank" rel="noopener noreferrer"
+                                                                    data-auth="NotApplicable" style="text-decoration:none"
+                                                                    data-linkindex="2"
+                                                                    title="https://www.youtube.com/user/LaPositivaPeru"><img
+                                                                        data-imagetype="External"
+                                                                        src="http://cdn.email-platform.com/positivaseguros/COBRANZAS/Estaticas/youtube.png"
+                                                                        data-imageproxyendpoint="/actions/ei" alt="youtube"
+                                                                        style="max-width:10px; padding-right:5px"> </a></td>
+                                                        </tr>
+                                                        <tr>
+                                                            <td
+                                                                style="font-family:Helvetica; font-size:13px; font-weight:bolder">
+                                                                <a href="https://www.lapositiva.com.pe/wps/portal/corporativo/home"
+                                                                    target="_blank" rel="noopener noreferrer"
+                                                                    data-auth="NotApplicable"
+                                                                    style="color:white!important; text-decoration:none!important"
+                                                                    data-linkindex="3"
+                                                                    title="https://www.lapositiva.com.pe/wps/portal/corporativo/home">lapositiva.pe</a>
+                                                            </td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </td>
+                                            <td style="width:50%; padding:0; text-align:right">
+                                                <a
+                                                    href="https://www.lapositiva.com.pe/" target="_blank"
+                                                    rel="noopener noreferrer" data-auth="NotApplicable" data-linkindex="4"
+                                                    title="https://www.lapositiva.com.pe/"><img data-imagetype="External"
+                                                        src="http://cdn.email-platform.com/positivaseguros/COBRANZAS/Estaticas/logo.png"
+                                                        data-imageproxyendpoint="/actions/ei" alt="La Positiva"
+                                                        style="max-width:100px; width:100%"> 
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
                             </td>
                         </tr>
                     </table>
