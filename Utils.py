@@ -1,4 +1,5 @@
 import os
+import random
 import stat
 import subprocess
 import time
@@ -23,6 +24,9 @@ LIMA_TZ = ZoneInfo("America/Lima")
 
 def get_current_datetime():
     return datetime.now(tz=LIMA_TZ)
+
+def get_random_delay(break_min_call: float, break_max_call: float):
+    time.sleep(random.uniform(break_min_call, break_max_call))
 
 def show_custom_rule(console, titulo, state = "Success"):
     total_width = console.width
@@ -514,3 +518,13 @@ def is_pid_running(pid: int) -> bool:
         return True
     finally:
         kernel32.CloseHandle(handle)
+
+def get_coord_screen_x() -> int:
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        SM_XVIRTUALSCREEN = 76
+        virtual_left = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        
+        return virtual_left - 1566
+    except Exception:
+        return -2500

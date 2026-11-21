@@ -1,10 +1,9 @@
-import random
 import re
 # import numpy as np
 import time
 import zipfile
 from rich.console import Console
-from Config import settings
+from Config import settings, BASE_DIR
 from loguru import logger
 from typing import Callable
 from playwright.sync_api import sync_playwright, Playwright, Page, Browser, BrowserContext, FrameLocator
@@ -19,8 +18,10 @@ from Utils import (
     build_sunat_email_html,
     export_df_to_excel,
     get_current_datetime,
+    get_random_delay,
     copy_items_to_folder,
     control_storage_day,
+    get_coord_screen_x,
     logger,
     datetime,
     pd,
@@ -28,13 +29,16 @@ from Utils import (
     show_custom_rule,
     start_log,
     sys, 
-    shutil
+    os,
+    shutil,
+    ctypes
 )
+
+PATH_GENERAL = BASE_DIR
+PATH_GENERAL_CLOUD = Path(settings.PATH_CLOUD_TEST)
 
 START_TIME, END_TIME = get_current_datetime(), get_current_datetime()
 PERIOD_TIME = f"{START_TIME.year}{START_TIME.month:02d}{START_TIME.day:02d}"
-PATH_GENERAL = Path(__file__).resolve().parent
-PATH_GENERAL_CLOUD = Path(settings.PATH_CLOUD_TEST)
 
 PATH_FOLDER_HISTORY_CLOUD = PATH_GENERAL_CLOUD / "Historicos"
 PATH_FOLDER_INPUTS_CLOUD = PATH_GENERAL_CLOUD / "Inputs"
@@ -86,7 +90,7 @@ URL_LOGIN_SUNAT = (
 
 MAX_RECORDS_PER_RUN = 1500
 BREAK_MIN_CALL = 2.0
-BREAK_MAX_CALL = 2.0
+BREAK_MAX_CALL = 2.5
 BATCH_SIZE = 500
 BREAK_SECONDS_RECOVER = 3
 BREAK_MINUTE_BATCH = 1.0
@@ -107,6 +111,7 @@ class SunatConexionError(Exception):
 
 class Robot_Sunat:
     def __init__(self):
+        self.offscreen_x = get_coord_screen_x()
         self.Execute_Robot()
 
     def Acquire_Lock(self) -> bool:
@@ -122,9 +127,6 @@ class Robot_Sunat:
 
     def Release_Lock(self) -> None:
         PATH_LOCK_FILE.unlink(missing_ok=True)
-
-    def Random_Delay(self):
-        time.sleep(random.uniform(BREAK_MIN_CALL, BREAK_MAX_CALL))
 
     def Index_XMLs_Locals(self) -> dict[tuple[str, str], str]:
         indice_xmls: dict[tuple[str, str], str] = {}
@@ -306,6 +308,40 @@ class Robot_Sunat:
             page.wait_for_timeout(interval_ms)
         return False
 
+    def Move_Browser_Offscreen(self, page: Page):
+        try:
+            unique_title = f"EDGE_RPA_self.area_{os.getpid()}"
+            page.evaluate(f"document.title = '{unique_title}'")
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            HWND_BOTTOM = 1
+            SWP_NOSIZE = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            SWP_SHOWWINDOW = 0x0040
+
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            target_hwnd = None
+
+            def enum_windows_cb(hwnd, _lparam):
+                nonlocal target_hwnd
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    buff = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buff, length + 1)
+                    if unique_title in buff.value:
+                        target_hwnd = hwnd
+                        return False
+                return True
+
+            user32.EnumWindows(WNDENUMPROC(enum_windows_cb), 0)
+
+            if target_hwnd:
+                user32.SetWindowPos(target_hwnd,HWND_BOTTOM,self.offscreen_x,0,0,0,SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,)
+        except Exception as e:
+            logger.debug(
+                f"[self.area] No se pudo mover la ventana fuera de pantalla: {e}"
+            )
+
     def Login_Sunat(self, playwright_instance: Playwright, max_login_attempts: int = 3):
         for attempt in range(1, max_login_attempts + 1):
             context = None
@@ -321,14 +357,17 @@ class Robot_Sunat:
                     no_viewport=True,
                     accept_downloads=True,
                     args=[
-                        "--start-maximized",
+                        "--window-size=1366,768",
+                        f"--window-position={self.offscreen_x},0",
                         "--disable-blink-features=AutomationControlled",
                         "--no-first-run",
                         "--no-default-browser-check",
                     ],
                 )
 
+                context.clear_cookies()
                 page = context.pages[0] if context.pages else context.new_page()
+                self.Move_Browser_Offscreen(page)
 
                 page.goto(URL_LOGIN_SUNAT, wait_until="networkidle", timeout=30000)
 
@@ -908,7 +947,7 @@ class Robot_Sunat:
                         if sunat_colapse:
                             break
                         
-                        self.Random_Delay()
+                        get_random_delay(BREAK_MIN_CALL,BREAK_MAX_CALL)
 
                         if (contador_batch % BATCH_SIZE == 0) and (contador_batch < total_rows and contador_batch < MAX_RECORDS_PER_RUN):
                             logger.info(
@@ -1017,7 +1056,7 @@ class Robot_Sunat:
                 if self.zip_generado and self.zip_generado.exists():
                     body_html = build_sunat_email_html(
                         "Siniestros",
-                        self.period_time,
+                        PERIOD_TIME,
                         len(df_descargados),
                         len(df_descargados),
                         self.zip_generado.name,
@@ -1032,13 +1071,14 @@ class Robot_Sunat:
                         CLIENT_SECRET,
                         MAIL_BOX,
                         RECIPIENTS_MAIL_LIST,
-                        f"ROBOT SUNAT XML | Lote {self.period_time} ({len(df_descargados)} XMLs)",
+                        f"ROBOT SUNAT XML | Lote {PERIOD_TIME} ({len(df_descargados)} XMLs)",
                         body_html,
                         self.zip_generado,
                         "OPERACIONES"
                     )
                     if email_sent:
                         email_failed = False
+
                     copy_items_to_folder(PATH_FOLDER_XMLS_ZIP, PATH_FOLDER_XMLS_ZIP_CLOUD,True,False)
                     logger.info(
                         f"Se guardó Consolidado ZIP en OneDrive: {PATH_FOLDER_XMLS_ZIP_CLOUD}/{self.zip_generado.name}"

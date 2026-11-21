@@ -1,4 +1,6 @@
 import os
+import sys
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
 import keyring
@@ -6,8 +8,14 @@ import keyring
 AMBIENTE = os.getenv("APP_ENV", "DEV").upper()
 SERVICIO = f"RPA_SUNAT_{AMBIENTE}"
 
+BASE_DIR = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False) or ("__compiled__" in globals())
+    else Path(__file__).resolve().parent
+)
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
+    model_config = SettingsConfigDict(env_file=BASE_DIR / '.env', env_file_encoding='utf-8')
 
     SUNAT_RUC_LPG: str
     SUNAT_RUC_LPE: str

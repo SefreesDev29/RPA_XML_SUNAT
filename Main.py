@@ -1,5 +1,4 @@
 import multiprocessing
-import random
 import re
 import time
 import io
@@ -7,7 +6,7 @@ import json
 import zipfile
 from typing import Callable
 from rich.console import Console
-from Config import settings
+from Config import settings, BASE_DIR
 from loguru import logger
 from playwright.sync_api import (
     sync_playwright,
@@ -26,8 +25,10 @@ from Utils import (
     build_sunat_email_html,
     export_df_to_excel,
     get_current_datetime,
+    get_random_delay,
     copy_items_to_folder,
     control_storage_day,
+    get_coord_screen_x,
     remove_temporal_folder,
     datetime,
     pd,
@@ -38,13 +39,11 @@ from Utils import (
     os,
     sys,
     shutil,
+    ctypes
 )
 
-if getattr(sys, "frozen", False): 
-    PATH_GENERAL = Path(sys.executable).resolve().parent  
-else:
-    PATH_GENERAL = Path(__file__).resolve().parent 
 
+PATH_GENERAL = BASE_DIR
 PATH_GENERAL_CLOUD = Path(
     settings.PATH_CLOUD
 )
@@ -86,7 +85,7 @@ MAX_DAILY_QUOTA = settings.MAX_DAILY_QUOTA
 MAX_ZIP_SIZE_MB = settings.MAX_ZIP_SIZE_MB
 
 BREAK_MIN_CALL = 2.0
-BREAK_MAX_CALL = 2.0
+BREAK_MAX_CALL = 2.5
 BATCH_SIZE = 500
 BREAK_SECONDS_RECOVER = 3
 BREAK_MINUTE_BATCH = 1.0
@@ -110,6 +109,7 @@ class Robot_Sunat:
         self.area = area.strip()
         self.console = Console()
         self.start_time = get_current_datetime()
+        self.offscreen_x = get_coord_screen_x()
         self.end_time = self.start_time
         self.period_time = f"{self.start_time.year}{self.start_time.month:02d}{self.start_time.day:02d}"
 
@@ -139,7 +139,7 @@ class Robot_Sunat:
 
         self.Execute_Robot()
 
-    def _write_lock_atomic(self) -> bool:
+    def Write_Lock_Atomic(self) -> bool:
         content = f"{os.getpid()}|{time.time()}".encode("utf-8")
         try:
             fd = os.open(
@@ -157,7 +157,7 @@ class Robot_Sunat:
     def Acquire_Lock(self) -> bool:
         self.path_area_local.mkdir(parents=True, exist_ok=True)
 
-        if self._write_lock_atomic():
+        if self.Write_Lock_Atomic():
             return True
 
         try:
@@ -194,13 +194,10 @@ class Robot_Sunat:
             )
             self.path_lock_file.unlink(missing_ok=True)
 
-        return self._write_lock_atomic()
+        return self.Write_Lock_Atomic()
 
     def Release_Lock(self) -> None:
         self.path_lock_file.unlink(missing_ok=True)
-
-    def Random_Delay(self):
-        time.sleep(random.uniform(BREAK_MIN_CALL, BREAK_MAX_CALL))
 
     def Ingest_Cloud_Inputs(self):
         if not self.path_folder_inputs_cloud.exists():
@@ -390,6 +387,40 @@ class Robot_Sunat:
             page.wait_for_timeout(interval_ms)
         return False
 
+    def Move_Browser_Offscreen(self, page: Page):
+        try:
+            unique_title = f"EDGE_RPA_{self.area}_{os.getpid()}"
+            page.evaluate(f"document.title = '{unique_title}'")
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            HWND_BOTTOM = 1
+            SWP_NOSIZE = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            SWP_SHOWWINDOW = 0x0040
+
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            target_hwnd = None
+
+            def enum_windows_cb(hwnd, _lparam):
+                nonlocal target_hwnd
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    buff = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buff, length + 1)
+                    if unique_title in buff.value:
+                        target_hwnd = hwnd
+                        return False
+                return True
+
+            user32.EnumWindows(WNDENUMPROC(enum_windows_cb), 0)
+
+            if target_hwnd:
+                user32.SetWindowPos(target_hwnd,HWND_BOTTOM,self.offscreen_x,0,0,0,SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,)
+        except Exception as e:
+            logger.debug(
+                f"[{self.area}] No se pudo mover la ventana fuera de pantalla: {e}"
+            )
+
     def Login_Sunat(self, playwright_instance: Playwright, company: str, max_login_attempts: int = 3) -> tuple[BrowserContext, Page, FrameLocator]:
         creds = SUNAT_CREDENTIALS.get(company.upper())
         if not creds or not creds["ruc"] or not creds["user"] or not creds["password"]:
@@ -411,7 +442,8 @@ class Robot_Sunat:
                     no_viewport=True,
                     accept_downloads=True,
                     args=[
-                        "--start-maximized",
+                        "--window-size=1366,768",
+                        f"--window-position={self.offscreen_x},0",
                         "--disable-blink-features=AutomationControlled",
                         "--no-first-run",
                         "--no-default-browser-check",
@@ -420,6 +452,7 @@ class Robot_Sunat:
 
                 context.clear_cookies()
                 page = context.pages[0] if context.pages else context.new_page()
+                self.Move_Browser_Offscreen(page)
 
                 page.goto(URL_LOGIN_SUNAT, wait_until="networkidle", timeout=30000)
 
@@ -1157,7 +1190,7 @@ class Robot_Sunat:
                             if sunat_colapse:
                                 break
 
-                            self.Random_Delay()
+                            get_random_delay(BREAK_MIN_CALL,BREAK_MAX_CALL)
 
                             if (contador_batch % BATCH_SIZE == 0) and (contador_batch < len(df_pendientes_sunat)):
                                 logger.info(
