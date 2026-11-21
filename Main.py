@@ -71,6 +71,8 @@ CLIENT_SECRET = settings.CLIENT_SECRET
 MAIL_BOX = settings.MAIL_BOX
 RECIPIENTS_MAIL_LIST = settings.RECIPIENTS_MAIL_LIST
 
+BROWSER_MINIMIZED = settings.BROWSER_MINIMIZED
+
 URL_LOGIN_SUNAT = (
     "https://api-seguridad.sunat.gob.pe/v1/clientessol/4f3b88b3-d9d6-402a-b85d-6a0bc857746a/oauth2/loginMenuSol"
     "?lang=es-PE&showDni=true&showLanguages=false"
@@ -433,6 +435,15 @@ class Robot_Sunat:
             try:
                 logger.info(f"[{self.area} | {company}] Lanzando Edge y autenticando en SOL (Intento {attempt}/{max_login_attempts})...")
 
+                window_args = (
+                    [
+                        "--window-size=1366,768",
+                        f"--window-position={self.offscreen_x},0",
+                    ]
+                    if BROWSER_MINIMIZED
+                    else ["--start-maximized"]
+                )
+
                 context = playwright_instance.chromium.launch_persistent_context(
                     user_data_dir=str(self.path_perfil_edge),
                     channel="msedge",
@@ -442,9 +453,11 @@ class Robot_Sunat:
                     no_viewport=True,
                     accept_downloads=True,
                     args=[
-                        "--window-size=1366,768",
-                        f"--window-position={self.offscreen_x},0",
+                        *window_args,
                         "--disable-blink-features=AutomationControlled",
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-renderer-backgrounding",
+                        "--disable-features=CalculateNativeWinOcclusion",
                         "--no-first-run",
                         "--no-default-browser-check",
                     ],
@@ -452,7 +465,9 @@ class Robot_Sunat:
 
                 context.clear_cookies()
                 page = context.pages[0] if context.pages else context.new_page()
-                self.Move_Browser_Offscreen(page)
+
+                if BROWSER_MINIMIZED:
+                    self.Move_Browser_Offscreen(page)
 
                 page.goto(URL_LOGIN_SUNAT, wait_until="networkidle", timeout=30000)
 
@@ -1255,6 +1270,7 @@ class Robot_Sunat:
                 logger.info(f"[{self.area}] Se descargó los XMLs de todos los comprobantes. Carpeta Inputs limpia...")
 
             email_failed = False
+            emails_sent_count = 0
 
             if not df_descargados.empty:
                 self.path_folder_xmls.mkdir(parents=True, exist_ok=True)
@@ -1314,6 +1330,7 @@ class Robot_Sunat:
                     )
 
                     if email_sent:
+                        emails_sent_count += 1
                         df_descargados.loc[idxs_en_parte, "ESTADO"] = "ENVIADO_CORREO"
                         df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] = df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] + f" | ENVIADO_ZIP: {ruta_zip.name}"
                     else:
@@ -1338,11 +1355,14 @@ class Robot_Sunat:
 
                 if self.path_folder_xmls.exists():
                     remove_temporal_folder(self.path_folder_xmls,self.area)
+            else:
+                email_failed = False
+                logger.warning(f"No se envío correo al no encontrar XMLs descargados.")
 
             if email_failed:
                 self.Finish_Process(
                     False,
-                    "XMLs descargados y respaldados en OneDrive, pero falló el envío de correo.",
+                    f"Falló el envío de {"algunos correos" if emails_sent_count > 1 else "correo"}.",
                 )
             else:
                 self.Finish_Process(True)

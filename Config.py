@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     MAIL_BOX: str
 
     RECIPIENTS_MAIL_LIST: str | list[str]
+    BROWSER_MINIMIZED: bool = True
 
     @field_validator("RECIPIENTS_MAIL_LIST", mode="after")
     @classmethod

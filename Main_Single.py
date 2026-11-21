@@ -79,6 +79,7 @@ CLIENT_SECRET = settings.CLIENT_SECRET
 MAIL_BOX = settings.MAIL_BOX
 RECIPIENTS_MAIL_LIST = settings.RECIPIENTS_MAIL_LIST
 
+BROWSER_MINIMIZED = settings.BROWSER_MINIMIZED
 PATH_PERFIL_EDGE = PATH_GENERAL / "Perfil_Edge_Robot"
 
 URL_LOGIN_SUNAT = (
@@ -105,6 +106,8 @@ MAP_TYPES_CPE = {
 }
 
 COLUMNS_FINAL = ["ARCHIVO_ORIGEN", "EMPRESA", "#EXP", "RUC", "COD_DCMNTO", "TPO_DCMNTO", "SERIEDOC", "NUMERODOC", "RAZON_SOCIAL", "ESTADO", "DETALLE_ESTADO", "FECHA_PROCESO"]
+
+# uv run --with nuitka python -m nuitka --standalone --assume-yes-for-downloads --include-package=keyring.backends --output-filename=Robot_Sunat_XML_Single.exe Main_Single.py
 
 class SunatConexionError(Exception):
     pass
@@ -348,6 +351,15 @@ class Robot_Sunat:
             try:
                 logger.info(f"Lanzando navegador Edge y autenticando en SOL (Intento {attempt}/{max_login_attempts})...")
 
+                window_args = (
+                    [
+                        "--window-size=1366,768",
+                        f"--window-position={self.offscreen_x},0",
+                    ]
+                    if BROWSER_MINIMIZED
+                    else ["--start-maximized"]
+                )
+                
                 context = playwright_instance.chromium.launch_persistent_context(
                     user_data_dir=str(PATH_PERFIL_EDGE),
                     channel="msedge",
@@ -357,9 +369,11 @@ class Robot_Sunat:
                     no_viewport=True,
                     accept_downloads=True,
                     args=[
-                        "--window-size=1366,768",
-                        f"--window-position={self.offscreen_x},0",
+                        *window_args,
                         "--disable-blink-features=AutomationControlled",
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-renderer-backgrounding",
+                        "--disable-features=CalculateNativeWinOcclusion",
                         "--no-first-run",
                         "--no-default-browser-check",
                     ],
@@ -367,7 +381,9 @@ class Robot_Sunat:
 
                 context.clear_cookies()
                 page = context.pages[0] if context.pages else context.new_page()
-                self.Move_Browser_Offscreen(page)
+
+                if BROWSER_MINIMIZED:
+                    self.Move_Browser_Offscreen(page)
 
                 page.goto(URL_LOGIN_SUNAT, wait_until="networkidle", timeout=30000)
 
@@ -1031,6 +1047,7 @@ class Robot_Sunat:
                 logger.info("Se descargó los XMLs de todos los comprobantes. Carpeta Inputs limpia...")
 
             email_failed = True
+            emails_sent_count = 0
 
             timestamp_actual = datetime.now().strftime("%Y%m%d_%H%M%S")
             if not df_descargados.empty:
@@ -1076,7 +1093,9 @@ class Robot_Sunat:
                         self.zip_generado,
                         "OPERACIONES"
                     )
+
                     if email_sent:
+                        emails_sent_count += 1
                         email_failed = False
 
                     copy_items_to_folder(PATH_FOLDER_XMLS_ZIP, PATH_FOLDER_XMLS_ZIP_CLOUD,True,False)
@@ -1086,11 +1105,14 @@ class Robot_Sunat:
 
                 if PATH_FOLDER_XMLS.exists():
                     remove_temporal_folder(PATH_FOLDER_XMLS)
+            else:
+                email_failed = False
+                logger.warning(f"No se envío correo al no encontrar XMLs descargados.")
 
             if email_failed:
                 self.Finish_Process(
                     False,
-                    "XMLs descargados y respaldados en OneDrive, pero falló el envío de correo.",
+                    f"Falló el envío de {"algunos correos" if emails_sent_count > 1 else "correo"}.",
                 )
             else:
                 self.Finish_Process(True)
