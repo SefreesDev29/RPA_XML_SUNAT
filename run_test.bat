@@ -10,6 +10,12 @@ echo =======================================================
 
 call .venv\Scripts\python.exe Main.py
 
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] El proceso finalizo con codigo de error: %ERRORLEVEL%
+    pause
+    exit /b %ERRORLEVEL%
+)
+
 echo.
 echo Proceso finalizado en TEST.
 pause

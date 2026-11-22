@@ -7,6 +7,8 @@ import time
 from rich.console import Console
 from rich.panel import Panel
 
+# uv run --with nuitka python -m nuitka --onefile --assume-yes-for-downloads --include-package=keyring.backends --output-filename=Setup_Credentials.exe setup_credentials.py
+
 console = Console()
 
 AMBIENTE = os.getenv("APP_ENV", "DEV").upper()

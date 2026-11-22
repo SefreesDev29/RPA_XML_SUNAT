@@ -1,3 +1,4 @@
+import pip_system_certs.wrapt_requests
 import multiprocessing
 import re
 import time

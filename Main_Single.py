@@ -1,3 +1,4 @@
+import pip_system_certs.wrapt_requests
 import re
 # import numpy as np
 import time
@@ -107,7 +108,9 @@ MAP_TYPES_CPE = {
 
 COLUMNS_FINAL = ["ARCHIVO_ORIGEN", "EMPRESA", "#EXP", "RUC", "COD_DCMNTO", "TPO_DCMNTO", "SERIEDOC", "NUMERODOC", "RAZON_SOCIAL", "ESTADO", "DETALLE_ESTADO", "FECHA_PROCESO"]
 
-# uv run --with nuitka python -m nuitka --standalone --assume-yes-for-downloads --include-package=keyring.backends --output-filename=Robot_Sunat_XML_Single.exe Main_Single.py
+# uv run --with nuitka python -m nuitka --standalone --assume-yes-for-downloads 
+# --include-package=keyring.backends --include-package=pip_system_certs
+# --output-filename=Robot_Sunat_XML_Single.exe Main_Single.py
 
 class SunatConexionError(Exception):
     pass
