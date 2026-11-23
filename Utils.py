@@ -1,26 +1,35 @@
+import ctypes
+import functools
 import os
 import random
+import shutil
+import ssl
 import stat
 import subprocess
-import time
-import ctypes
-from datetime import datetime, date, timedelta
 import sys
-import shutil
+import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import base64
+import msal
+import pandas as pd
+import requests
 from loguru import logger
+from requests.adapters import HTTPAdapter
 from rich import print
 from rich.text import Text
-import pandas as pd
-import msal
-import requests
-import base64
 
 IS_DEV = os.getenv("APP_ENV", "PROD") == "DEV"
 
 LIMA_TZ = ZoneInfo("America/Lima")
+
+LEVEL_STYLES = {
+    "INFO": ("AVISO", "cyan", "cyan"),
+    "WARNING": ("ALERTA", "level", "level"),
+    "SUCCESS": ("ÉXITO", "level", "level"),
+}
 
 def get_current_datetime():
     return datetime.now(tz=LIMA_TZ)
@@ -52,38 +61,25 @@ def show_custom_rule(console, titulo, state = "Success"):
 def custom_format(type_process: int):
     def formatter(record: dict):
         levelname = record["level"].name
-        if levelname == "INFO":
-            text = "AVISO"
-            level_str = f"<cyan>{text:<7}</cyan>"
-            message_color = "<cyan>"
-        elif levelname == "WARNING":
-            text = "ALERTA"
-            level_str = f"<level>{text:<7}</level>"
-            message_color = "<level>"
-        elif levelname == "SUCCESS":
-            text = "ÉXITO"
-            level_str = f"<level>{text:<7}</level>"
-            message_color = "<level>"
-        else:
-            level_str = f"<level>{levelname:<7}</level>"
-            message_color = "<level>"
+        text, level_tag, msg_tag = LEVEL_STYLES.get(
+            levelname, (levelname, "level", "level")
+        )
         
-        original_message = str(record["message"])
-        safe_message = original_message.replace("{", "{{").replace("}", "}}")
-        custom_message = f"{message_color}{safe_message}</{message_color.strip('<>')}>\n"
-        
-        if type_process == 0:
-            level_str = f"{level_str} | "
-        else:
-            level_str = f"{level_str} | {record['name']}:{record['function']}:{record['line']} - "
-            if record["exception"] is not None:
-                custom_message += f"{record['exception']}\n"
+        level_str = f"<{level_tag}>{text:<7}</{level_tag}>"
+        prefix = (
+            f"{level_str} | "
+            if type_process == 0
+            else f"{level_str} | {{name}}:{{function}}:{{line}} - "
+        )
+        exception_part = "{exception}" if type_process != 0 else ""
 
         return (
-            f"<cyan><bold>{record['time']:DD/MM/YYYY HH:mm:ss}</bold></cyan> | "
-            f"{level_str}"
-            f"{custom_message}"
+            "<cyan><bold>{time:DD/MM/YYYY HH:mm:ss}</bold></cyan> | "
+            f"{prefix}"
+            f"<{msg_tag}>{{message}}</{msg_tag}>\n"
+            f"{exception_part}"
         )
+    
     return formatter
 
 def remove_log():
@@ -96,16 +92,17 @@ def add_log_console():
             format=custom_format(0))
 
 def add_log_file(path_log: Path, file_log_exist: bool, exits_log: bool):
-    if path_log.exists() and not exits_log:
-        logger.add(path_log, 
-                backtrace=True, diagnose=IS_DEV, level="INFO",
-                format="\n\n{time:DD/MM/YYYY HH:mm:ss} | {level:<7} | {name}:{function}:{line} - {message}") 
-        return file_log_exist
+    is_reopen = path_log.exists() and not exits_log
+
+    if is_reopen and path_log.stat().st_size > 0:
+        with open(path_log, "a", encoding="utf-8") as f:
+            f.write("\n\n")
     
     logger.add(path_log, 
-        backtrace=True, diagnose=IS_DEV, level="INFO",
-        format="{time:DD/MM/YYYY HH:mm:ss} | {level:<7} | {name}:{function}:{line} - {message}") 
-    return True
+        backtrace=True, diagnose=IS_DEV, level="INFO", encoding="utf-8",
+        format="{time:DD/MM/YYYY HH:mm:ss} | {level:<7} | {name}:{function}:{line} - {message}")
+     
+    return file_log_exist if is_reopen else True
 
 def start_log(path_log: Path, file_log_exist: bool, exits_log: bool = False):
     remove_log()
@@ -378,6 +375,76 @@ def build_sunat_email_html(
     </html>
     """
 
+@functools.lru_cache(maxsize=1)
+def build_windows_ssl_context() -> ssl.SSLContext:
+    ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    verify_x509_strict = getattr(ssl, "VERIFY_X509_STRICT", 0)
+    if verify_x509_strict:
+        ctx.verify_flags &= ~verify_x509_strict
+
+    try:
+        import certifi
+
+        cafile = Path(certifi.where())
+        if cafile.is_file():
+            ctx.load_verify_locations(cafile=str(cafile))
+    except Exception:
+        pass
+
+    for env_var in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+        env_path_raw = os.environ.get(env_var)
+        if not env_path_raw:
+            continue
+        env_path = Path(env_path_raw)
+        try:
+            if env_path.is_file():
+                ctx.load_verify_locations(cafile=str(env_path))
+            elif env_path.is_dir():
+                ctx.load_verify_locations(capath=str(env_path))
+        except (ssl.SSLError, OSError):
+            pass
+
+    return ctx
+
+class WindowsSSLAdapter(HTTPAdapter):
+    def __init__(self, ssl_context: ssl.SSLContext | None = None, **kwargs) -> None:
+        self._ssl_context = ssl_context or build_windows_ssl_context()
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs) -> None:
+        pool_kwargs["ssl_context"] = self._ssl_context
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    def proxy_manager_for(self, proxy: str, **proxy_kwargs):
+        proxy_kwargs["ssl_context"] = self._ssl_context
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+    def build_connection_pool_key_attributes(self, request, verify, cert=None):
+        host_params, pool_kwargs = super().build_connection_pool_key_attributes(
+            request, verify, cert
+        )
+        if verify is not False:
+            pool_kwargs["ssl_context"] = self._ssl_context
+            pool_kwargs.pop("ca_certs", None)
+            pool_kwargs.pop("ca_cert_dir", None)
+        return host_params, pool_kwargs
+
+    def cert_verify(self, conn, url: str, verify, cert) -> None:
+        if url.lower().startswith("https") and verify is not False:
+            super().cert_verify(conn, url, False, cert)
+            conn.cert_reqs = "CERT_REQUIRED"
+            conn.ca_certs = None
+            conn.ca_cert_dir = None
+        else:
+            super().cert_verify(conn, url, verify, cert)
+
+def create_windows_http_session(timeout: tuple[int, int] | int = (10, 30),max_retries: int = 1) -> requests.Session:
+    session = requests.Session()
+    session.mount("https://", WindowsSSLAdapter(max_retries=max_retries))
+    session.mount("http://", HTTPAdapter(max_retries=max_retries))
+    session.request = functools.partial(session.request, timeout=timeout)
+    return session
+
 def send_email_graph(
     tenant_id: str,
     client_id: str,
@@ -390,61 +457,72 @@ def send_email_graph(
     area: str | None = None,
     is_html: bool = True,
 ) -> bool:
-    authority = f"https://login.microsoftonline.com/{tenant_id}"
-    app = msal.ConfidentialClientApplication(
-        client_id, authority=authority, client_credential=client_secret, timeout=15
-    )
+    try:
+        with create_windows_http_session(timeout=(10, 30), max_retries=1) as http_session:
+            authority = f"https://login.microsoftonline.com/{tenant_id}"
+            app = msal.ConfidentialClientApplication(
+                client_id,
+                authority=authority,
+                client_credential=client_secret,
+                http_client=http_session,
+            )
 
-    scopes = ["https://graph.microsoft.com/.default"]
-    result = app.acquire_token_for_client(scopes=scopes)
+            scopes = ["https://graph.microsoft.com/.default"]
+            result = app.acquire_token_for_client(scopes=scopes)
 
-    if "access_token" not in result:
-        logger.error(f"Fallo al autenticar en Entra ID: {result.get('error_description')}")
-        return False
+            if "access_token" not in result:
+                logger.error(f"Fallo al autenticar en Entra ID: {result.get('error_description')}")
+                return False
 
-    token = result["access_token"]
+            token = result["access_token"]
 
-    to_recipients = [
-        {"emailAddress": {"address": correo.strip()}}
-        for correo in recipients
-    ]
+            to_recipients = [
+                {"emailAddress": {"address": correo.strip()}}
+                for correo in recipients
+            ]
 
-    mensaje = {
-        "subject": subject,
-        "body": {
-            "contentType": "HTML" if is_html else "Text", 
-            "content": body_text
-        },
-        "toRecipients": to_recipients,
-    }
-
-    if path_file_zip and path_file_zip.exists():
-        with open(path_file_zip, "rb") as f:
-            contenido_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-        mensaje["attachments"] = [
-            {
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                "name": path_file_zip.name,
-                "contentType": "application/zip",
-                "contentBytes": contenido_b64,
+            mensaje = {
+                "subject": subject,
+                "body": {
+                    "contentType": "HTML" if is_html else "Text", 
+                    "content": body_text
+                },
+                "toRecipients": to_recipients,
             }
-        ]
 
-    url_envio = f"https://graph.microsoft.com/v1.0/users/{mailbox}/sendMail"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    payload = {"message": mensaje, "saveToSentItems": "true"}
+            if path_file_zip and path_file_zip.exists():
+                with open(path_file_zip, "rb") as f:
+                    contenido_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    response = requests.post(url_envio, headers=headers, json=payload, timeout=(10, 30))
+                mensaje["attachments"] = [
+                    {
+                        "@odata.type": "#microsoft.graph.fileAttachment",
+                        "name": path_file_zip.name,
+                        "contentType": "application/zip",
+                        "contentBytes": contenido_b64,
+                    }
+                ]
 
-    if response.status_code == 202:
-        logger.info(f"[{area}] Correo enviado exitosamente a {recipients}.")
-        return True
-    else:
-        logger.error(f"[{area}] Error al enviar correo ({response.status_code}): {response.text}")
+            url_envio = f"https://graph.microsoft.com/v1.0/users/{mailbox}/sendMail"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            }
+            payload = {"message": mensaje, "saveToSentItems": "true"}
+
+            response = http_session.post(url_envio, headers=headers, json=payload, timeout=(10, 30))
+
+            if response.status_code == 202:
+                logger.info(f"[{area}] Correo enviado exitosamente a {recipients}.")
+                return True
+            else:
+                logger.error(f"[{area}] Error al enviar correo ({response.status_code}): {response.text}")
+                return False
+    except Exception as e:
+        zip_name = path_file_zip.name if path_file_zip else "SIN_ADJUNTO"
+        logger.error(
+            f"[{area}] No se pudo enviar el correo con ZIP {zip_name}. Detalles:\n{e}"
+        )
         return False
 
 def cleanup_storage_onedrive(path_folder: Path) -> None:

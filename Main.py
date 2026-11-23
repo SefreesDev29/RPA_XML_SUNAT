@@ -1,6 +1,7 @@
-import pip_system_certs.wrapt_requests
 import multiprocessing
 import re
+from pathlib import Path
+import os
 import time
 import io
 import json
@@ -18,7 +19,6 @@ from playwright.sync_api import (
 )
 
 from Utils import (
-    Path,
     print,
     add_log_console,
     add_log_file,
@@ -37,12 +37,10 @@ from Utils import (
     show_custom_rule,
     start_log,
     is_pid_running,
-    os,
     sys,
     shutil,
     ctypes
 )
-
 
 PATH_GENERAL = BASE_DIR
 PATH_GENERAL_CLOUD = Path(
@@ -424,6 +422,82 @@ class Robot_Sunat:
                 f"[{self.area}] No se pudo mover la ventana fuera de pantalla: {e}"
             )
 
+    def Disable_Edge_Download_Popup(self, page: Page) -> None:
+        target_prefs = {
+            "browser.show_hub_popup_on_download_start": False,
+            "download.prompt_for_download": False,
+            "credentials_enable_service": False,
+            "credentials_enable_autosignin": False,
+            "credentials_enable_autofill_passwords": False,
+            "credentials_enable_passwordgeneration": False,
+            "credentials_enable_autosave": False,
+        }
+        try:
+            page.goto("edge://settings/downloads", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_function(
+                "() => Boolean(window.chrome && chrome.settingsPrivate && chrome.settingsPrivate.getPref && chrome.settingsPrivate.setPref)",
+                timeout=10000,
+            )
+            results = page.evaluate(
+                """async (targetPrefs) => {
+                    const callWithTimeout = (fn) => new Promise((resolve, reject) => {
+                        const timer = setTimeout(() => reject(new Error("settingsPrivate callback timeout")), 5000);
+                        try {
+                            fn((res) => {
+                                clearTimeout(timer);
+                                resolve(res);
+                            });
+                        } catch (err) {
+                            clearTimeout(timer);
+                            reject(err);
+                        }
+                    });
+
+                    const getPref = (key) => callWithTimeout((cb) => chrome.settingsPrivate.getPref(key, cb));
+                    const setPref = (key, val) => callWithTimeout((cb) => chrome.settingsPrivate.setPref(key, val, "", cb));
+
+                    const results = {};
+                    for (const [key, desired] of Object.entries(targetPrefs)) {
+                        const beforeObj = await getPref(key);
+                        const beforeVal = beforeObj ? beforeObj.value : undefined;
+                        let changed = false;
+                        let setOk = true;
+                        if (beforeVal !== desired) {
+                            setOk = Boolean(await setPref(key, desired));
+                            changed = true;
+                        }
+                        const afterObj = await getPref(key);
+                        const afterVal = afterObj ? afterObj.value : undefined;
+                        results[key] = {
+                            before: beforeVal,
+                            after: afterVal,
+                            changed,
+                            ok: Boolean(setOk && afterVal === desired),
+                        };
+                    }
+                    return results;
+                }""",
+                target_prefs,
+            )
+            failed = {k: v for k, v in results.items() if not v.get("ok")}
+            if failed:
+                logger.warning(
+                    f"[{self.area}] No se pudieron confirmar todas las preferencias de Edge: {failed}"
+                )
+            elif any(v.get("changed") for v in results.values()):
+                page.wait_for_timeout(300)
+                logger.info(
+                    f"[{self.area}] Preferencias de Edge configuradas (popups de descargas y contraseñas desactivados)."
+                )
+            else:
+                logger.debug(
+                    f"[{self.area}] Preferencias de Edge ya estaban configuradas."
+                )
+        except Exception as e:
+            logger.warning(
+                f"[{self.area}] No se pudieron configurar las preferencias de Edge vía settingsPrivate: {e}"
+            )
+
     def Login_Sunat(self, playwright_instance: Playwright, company: str, max_login_attempts: int = 3) -> tuple[BrowserContext, Page, FrameLocator]:
         creds = SUNAT_CREDENTIALS.get(company.upper())
         if not creds or not creds["ruc"] or not creds["user"] or not creds["password"]:
@@ -459,6 +533,7 @@ class Robot_Sunat:
                         "--disable-backgrounding-occluded-windows",
                         "--disable-renderer-backgrounding",
                         "--disable-features=CalculateNativeWinOcclusion",
+                        "--disable-background-mode",
                         "--no-first-run",
                         "--no-default-browser-check",
                     ],
@@ -470,7 +545,9 @@ class Robot_Sunat:
                 if BROWSER_MINIMIZED:
                     self.Move_Browser_Offscreen(page)
 
-                page.goto(URL_LOGIN_SUNAT, wait_until="networkidle", timeout=30000)
+                self.Disable_Edge_Download_Popup(page)
+
+                page.goto(URL_LOGIN_SUNAT, wait_until="domcontentloaded", timeout=30000)
 
                 field_ruc = page.get_by_role("textbox", name="RUC")
                 field_ruc.wait_for(state="visible", timeout=30000)
@@ -1270,12 +1347,10 @@ class Robot_Sunat:
             else:
                 logger.info(f"[{self.area}] Se descargó los XMLs de todos los comprobantes. Carpeta Inputs limpia...")
 
-            email_failed = False
+            email_failed = True
             emails_sent_count = 0
 
             if not df_descargados.empty:
-                self.path_folder_xmls.mkdir(parents=True, exist_ok=True)
-                
                 copy_items_to_folder(self.path_folder_xmls,self.path_folder_xmls_cloud,False,True,self.area)
 
                 logger.info(
@@ -1286,65 +1361,69 @@ class Robot_Sunat:
                 zips_generados = self.Zip_Downloaded_XMLs(timestamp_actual)
                 total_parts = len(zips_generados)
 
-                for idx_parte, (ruta_zip, nombres_xml_parte) in enumerate(zips_generados, start=1):
-                    set_xmls_parte = set(nombres_xml_parte)
-                    idxs_en_parte = [
-                        i for i, xml_name in xml_por_idx.items()
-                        if xml_name in set_xmls_parte and i in df_descargados.index
-                    ]
+                if total_parts > 0:
+                    for idx_parte, (ruta_zip, nombres_xml_parte) in enumerate(zips_generados, start=1):
+                        set_xmls_parte = set(nombres_xml_parte)
+                        idxs_en_parte = [
+                            i for i, xml_name in xml_por_idx.items()
+                            if xml_name in set_xmls_parte and i in df_descargados.index
+                        ]
 
-                    part_companies = sorted(
-                        df_descargados.loc[idxs_en_parte, "EMPRESA"]
-                        .unique()
-                        .tolist()
-                    )
-                
-                    if total_parts == 1:
-                        email_subject = f"ROBOT SUNAT XML | [{self.area}] | Lote {self.period_time} ({len(nombres_xml_parte)} XMLs)"
-                    else:
-                        email_subject = (
-                            f"ROBOT SUNAT XML | {self.area} | Lote {self.period_time} — "
-                            f"Parte {idx_parte} de {total_parts}"
+                        part_companies = sorted(
+                            df_descargados.loc[idxs_en_parte, "EMPRESA"]
+                            .unique()
+                            .tolist()
+                        )
+                    
+                        if total_parts == 1:
+                            email_subject = f"ROBOT SUNAT XML | [{self.area}] | Lote {self.period_time} ({len(nombres_xml_parte)} XMLs)"
+                        else:
+                            email_subject = (
+                                f"ROBOT SUNAT XML | {self.area} | Lote {self.period_time} — "
+                                f"Parte {idx_parte} de {total_parts}"
+                            )
+
+                        body_html = build_sunat_email_html(
+                            self.area,
+                            self.period_time,
+                            len(nombres_xml_parte),
+                            len(df_descargados),
+                            ruta_zip.name,
+                            part_companies,
+                            idx_parte,
+                            total_parts,
                         )
 
-                    body_html = build_sunat_email_html(
-                        self.area,
-                        self.period_time,
-                        len(nombres_xml_parte),
-                        len(df_descargados),
-                        ruta_zip.name,
-                        part_companies,
-                        idx_parte,
-                        total_parts,
-                    )
-
-                    email_sent = send_email_graph(
-                        TENANT_ID,
-                        CLIENT_ID,
-                        CLIENT_SECRET,
-                        MAIL_BOX,
-                        RECIPIENTS_MAIL_LIST,
-                        email_subject,
-                        body_html,
-                        ruta_zip,
-                        self.area,
-                    )
-
-                    if email_sent:
-                        emails_sent_count += 1
-                        df_descargados.loc[idxs_en_parte, "ESTADO"] = "ENVIADO_CORREO"
-                        df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] = df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] + f" | ENVIADO_ZIP: {ruta_zip.name}"
-                    else:
-                        email_failed = True
-                        df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] = df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] + f" | ERROR_ENVIO_ZIP: {ruta_zip.name}"
-                        logger.error(
-                            f"[{self.area}] No se pudo enviar el correo para el paquete {ruta_zip.name}."
+                        email_sent = send_email_graph(
+                            TENANT_ID,
+                            CLIENT_ID,
+                            CLIENT_SECRET,
+                            MAIL_BOX,
+                            RECIPIENTS_MAIL_LIST,
+                            email_subject,
+                            body_html,
+                            ruta_zip,
+                            self.area,
                         )
 
-                copy_items_to_folder(self.path_folder_xmls_zip, self.path_folder_xmls_zip_cloud,True,False,self.area)
-                logger.info(
-                    f"[{self.area}] Se guardaron {total_parts} paquete(s) ZIP BK en OneDrive: {self.path_folder_xmls_zip_cloud}"
-                )
+                        if email_sent:
+                            email_failed = False
+                            emails_sent_count += 1
+                            df_descargados.loc[idxs_en_parte, "ESTADO"] = "ENVIADO_CORREO"
+                            df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] = df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] + f" | ENVIADO_ZIP: {ruta_zip.name}"
+                        else:
+                            df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] = df_descargados.loc[idxs_en_parte, "DETALLE_ESTADO"] + f" | ERROR_ENVIO_ZIP: {ruta_zip.name}"
+                            logger.error(
+                                f"[{self.area}] No se pudo enviar el correo para el paquete {ruta_zip.name}."
+                            )
+
+                    copy_items_to_folder(self.path_folder_xmls_zip, self.path_folder_xmls_zip_cloud,True,False,self.area)
+                    logger.info(
+                        f"[{self.area}] Se guardaron {total_parts} paquete(s) ZIP BK en OneDrive: {self.path_folder_xmls_zip_cloud}"
+                    )
+
+                    if self.path_folder_xmls_zip.exists():
+                        remove_temporal_folder(self.path_folder_xmls_zip,self.area)
 
                 path_process = self.path_folder_processed / f"Comprobantes_Descargados_{self.area}_{timestamp_actual}.xlsx"
                 export_df_to_excel(path_process, df_descargados[COLUMNS_FINAL])
@@ -1360,7 +1439,15 @@ class Robot_Sunat:
                 email_failed = False
                 logger.warning(f"No se envío correo al no encontrar XMLs descargados.")
 
-            if email_failed:
+            if self.path_folder_xmls.exists():
+                if list(self.path_folder_xmls.iterdir()):
+                    remove_temporal_folder(self.path_folder_xmls,self.area)
+
+            if self.path_folder_xmls_zip.exists():
+                if list(self.path_folder_xmls_zip.iterdir()):
+                    remove_temporal_folder(self.path_folder_xmls_zip,self.area)
+
+            if email_failed and not df_descargados.empty:
                 self.Finish_Process(
                     False,
                     f"Falló el envío de {"algunos correos" if emails_sent_count > 1 else "correo"}.",

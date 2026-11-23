@@ -1,5 +1,7 @@
-import pip_system_certs.wrapt_requests
 import re
+from pathlib import Path
+import os
+import json
 # import numpy as np
 import time
 import zipfile
@@ -90,7 +92,7 @@ URL_LOGIN_SUNAT = (
     "&state=rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcAUH2sHDFmDRAwACRgAKbG9hZEZhY3RvckkACXRocmVzaG9sZHhwP0AAAAAAAAx3CAAAABAAAAADdAADZXhlcHQABnBhcmFtc3QASyomKiYvY2wtdGktaXRtZW51L01lbnVJbnRlcm5ldC5odG0mYjY0ZDI2YThiNWFmMDkxOTIzYjIzYjY0MDdhMWMxZGI0MWU3MzNhNnQABGV4ZWNweA=="
 )
 
-MAX_RECORDS_PER_RUN = 1500
+MAX_RECORDS_PER_RUN = settings.MAX_DAILY_QUOTA
 BREAK_MIN_CALL = 2.0
 BREAK_MAX_CALL = 2.5
 BATCH_SIZE = 500
@@ -109,7 +111,7 @@ MAP_TYPES_CPE = {
 COLUMNS_FINAL = ["ARCHIVO_ORIGEN", "EMPRESA", "#EXP", "RUC", "COD_DCMNTO", "TPO_DCMNTO", "SERIEDOC", "NUMERODOC", "RAZON_SOCIAL", "ESTADO", "DETALLE_ESTADO", "FECHA_PROCESO"]
 
 # uv run --with nuitka python -m nuitka --standalone --assume-yes-for-downloads 
-# --include-package=keyring.backends --include-package=pip_system_certs
+# --include-package=keyring.backends
 # --output-filename=Robot_Sunat_XML_Single.exe Main_Single.py
 
 class SunatConexionError(Exception):
@@ -316,7 +318,7 @@ class Robot_Sunat:
 
     def Move_Browser_Offscreen(self, page: Page):
         try:
-            unique_title = f"EDGE_RPA_self.area_{os.getpid()}"
+            unique_title = f"EDGE_RPA_Siniestros_{os.getpid()}"
             page.evaluate(f"document.title = '{unique_title}'")
 
             user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -345,7 +347,109 @@ class Robot_Sunat:
                 user32.SetWindowPos(target_hwnd,HWND_BOTTOM,self.offscreen_x,0,0,0,SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,)
         except Exception as e:
             logger.debug(
-                f"[self.area] No se pudo mover la ventana fuera de pantalla: {e}"
+                f"[Siniestros] No se pudo mover la ventana fuera de pantalla: {e}"
+            )
+
+    def Disable_Edge_Download_Popup_BK(self):
+        try:
+            default_dir = PATH_PERFIL_EDGE / "Default"
+            default_dir.mkdir(parents=True, exist_ok=True)
+            prefs_path = default_dir / "Preferences"
+
+            prefs = {}
+            if prefs_path.exists():
+                try:
+                    prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+                except Exception:
+                    prefs = {}
+
+            prefs.setdefault("browser", {})[
+                "show_hub_popup_on_download_start"
+            ] = False
+            prefs.setdefault("download", {})["prompt_for_download"] = False
+
+            prefs_path.write_text(
+                json.dumps(prefs, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.debug(
+                f"[Siniestros] No se pudo configurar Preferences de Edge: {e}"
+            )
+
+    def Disable_Edge_Download_Popup(self, page: Page) -> None:
+        target_prefs = {
+            "browser.show_hub_popup_on_download_start": False,
+            "download.prompt_for_download": False,
+            "credentials_enable_service": False,
+            "credentials_enable_autosignin": False,
+            "credentials_enable_autofill_passwords": False,
+            "credentials_enable_passwordgeneration": False,
+            "credentials_enable_autosave": False,
+        }
+        try:
+            page.goto("edge://settings/downloads", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_function(
+                "() => Boolean(window.chrome && chrome.settingsPrivate && chrome.settingsPrivate.getPref && chrome.settingsPrivate.setPref)",
+                timeout=10000,
+            )
+            results = page.evaluate(
+                """async (targetPrefs) => {
+                    const callWithTimeout = (fn) => new Promise((resolve, reject) => {
+                        const timer = setTimeout(() => reject(new Error("settingsPrivate callback timeout")), 5000);
+                        try {
+                            fn((res) => {
+                                clearTimeout(timer);
+                                resolve(res);
+                            });
+                        } catch (err) {
+                            clearTimeout(timer);
+                            reject(err);
+                        }
+                    });
+
+                    const getPref = (key) => callWithTimeout((cb) => chrome.settingsPrivate.getPref(key, cb));
+                    const setPref = (key, val) => callWithTimeout((cb) => chrome.settingsPrivate.setPref(key, val, "", cb));
+
+                    const results = {};
+                    for (const [key, desired] of Object.entries(targetPrefs)) {
+                        const beforeObj = await getPref(key);
+                        const beforeVal = beforeObj ? beforeObj.value : undefined;
+                        let changed = false;
+                        let setOk = true;
+                        if (beforeVal !== desired) {
+                            setOk = Boolean(await setPref(key, desired));
+                            changed = true;
+                        }
+                        const afterObj = await getPref(key);
+                        const afterVal = afterObj ? afterObj.value : undefined;
+                        results[key] = {
+                            before: beforeVal,
+                            after: afterVal,
+                            changed,
+                            ok: Boolean(setOk && afterVal === desired),
+                        };
+                    }
+                    return results;
+                }""",
+                target_prefs,
+            )
+            failed = {k: v for k, v in results.items() if not v.get("ok")}
+            if failed:
+                logger.warning(
+                    f"[Siniestros] No se pudieron confirmar todas las preferencias de Edge: {failed}"
+                )
+            elif any(v.get("changed") for v in results.values()):
+                page.wait_for_timeout(300)
+                logger.info(
+                    f"[Siniestros] Preferencias de Edge configuradas (popups de descargas y contraseñas desactivados)."
+                )
+            else:
+                logger.debug(
+                    f"[Siniestros] Preferencias de Edge ya estaban configuradas."
+                )
+        except Exception as e:
+            logger.warning(
+                f"[Siniestros] No se pudieron configurar las preferencias de Edge vía settingsPrivate: {e}"
             )
 
     def Login_Sunat(self, playwright_instance: Playwright, max_login_attempts: int = 3):
@@ -362,6 +466,8 @@ class Robot_Sunat:
                     if BROWSER_MINIMIZED
                     else ["--start-maximized"]
                 )
+
+                # self.Disable_Edge_Download_Popup()
                 
                 context = playwright_instance.chromium.launch_persistent_context(
                     user_data_dir=str(PATH_PERFIL_EDGE),
@@ -377,6 +483,7 @@ class Robot_Sunat:
                         "--disable-backgrounding-occluded-windows",
                         "--disable-renderer-backgrounding",
                         "--disable-features=CalculateNativeWinOcclusion",
+                        "--disable-background-mode",
                         "--no-first-run",
                         "--no-default-browser-check",
                     ],
@@ -388,7 +495,9 @@ class Robot_Sunat:
                 if BROWSER_MINIMIZED:
                     self.Move_Browser_Offscreen(page)
 
-                page.goto(URL_LOGIN_SUNAT, wait_until="networkidle", timeout=30000)
+                self.Disable_Edge_Download_Popup(page)
+
+                page.goto(URL_LOGIN_SUNAT, wait_until="domcontentloaded", timeout=30000) #networkidle
 
                 field_ruc = page.get_by_role("textbox", name="RUC")
                 field_ruc.click()
@@ -1106,13 +1215,25 @@ class Robot_Sunat:
                         f"Se guardó Consolidado ZIP en OneDrive: {PATH_FOLDER_XMLS_ZIP_CLOUD}/{self.zip_generado.name}"
                     )
 
+                    if PATH_FOLDER_XMLS_ZIP.exists():
+                        remove_temporal_folder(PATH_FOLDER_XMLS_ZIP)
+
                 if PATH_FOLDER_XMLS.exists():
                     remove_temporal_folder(PATH_FOLDER_XMLS)
             else:
                 email_failed = False
                 logger.warning(f"No se envío correo al no encontrar XMLs descargados.")
 
-            if email_failed:
+            
+            if PATH_FOLDER_XMLS.exists():
+                if not list(PATH_FOLDER_XMLS.iterdir()):
+                    remove_temporal_folder(PATH_FOLDER_XMLS)
+
+            if PATH_FOLDER_XMLS_ZIP.exists():
+                if not list(PATH_FOLDER_XMLS_ZIP.iterdir()):
+                    remove_temporal_folder(PATH_FOLDER_XMLS_ZIP)
+
+            if email_failed and not df_descargados.empty:
                 self.Finish_Process(
                     False,
                     f"Falló el envío de {"algunos correos" if emails_sent_count > 1 else "correo"}.",
